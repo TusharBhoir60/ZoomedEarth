@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda/venv
+.env
+.venv/
+
+# Data (never in git)
+data/
+
+# Model weights (downloaded, not committed)
+models/
+
+# Experiment outputs
+outputs/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

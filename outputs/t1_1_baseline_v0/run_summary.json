@@ -1,0 +1,111 @@
+{
+  "task_id": "T1.1",
+  "run_id": "t1_1_baseline_v0",
+  "timestamp": "2026-10-03T16:23:00+05:30",
+  "git_sha": "95b18a389fb147b16903d2ab67c9c0bc5cec7fca",
+
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+    "vram_total_mb": 6144,
+    "ram_gb": 16,
+    "cpu": "Intel i5 12th Gen",
+    "os": "Native Linux",
+    "nvidia_driver": "595.91.07",
+    "cuda_version": "12.1"
+  },
+
+  "software_versions": {
+    "python": "3.10.21",
+    "torch": "2.3.0+cu121",
+    "sen2sr": "0.8.5",
+    "mlstac": "0.4.9",
+    "rasterio": "1.4.4",
+    "pytest": "9.1.1",
+    "numpy": "2.2.6",
+    "safetensors": "0.8.0"
+  },
+
+  "model": {
+    "name": "SEN2SRLite",
+    "variant": "NonReference_RGBN_x4",
+    "source": "https://huggingface.co/tacofoundation/sen2sr/resolve/main/SEN2SRLite/main/mlm.json",
+    "weights_files": [
+      "sr_model.safetensor",
+      "sr_hard_constraint.safetensor"
+    ],
+    "code_license": "MIT",
+    "weights_license": "CC0 1.0 Universal (Public Domain)"
+  },
+
+  "band_order": {
+    "repository_input":  ["B02", "B03", "B04", "B08"],
+    "model_input":       ["B04", "B03", "B02", "B08"],
+    "permute_forward":   [2, 1, 0, 3],
+    "permute_reverse":   [2, 1, 0, 3]
+  },
+
+  "official_sample_inference": {
+    "input_shape": [1, 10, 128, 128],
+    "rgbn_slice_used": [0, 4],
+    "effective_input_shape": [1, 4, 128, 128],
+    "input_dtype": "float32",
+    "output_shape": [1, 4, 512, 512],
+    "output_dtype": "float32",
+    "output_min": 0.01031,
+    "output_max": 0.55433,
+    "contains_nan": false,
+    "fp32_latency_ms": 10.58,
+    "fp32_peak_vram_mb": 163.67
+  },
+
+  "precision_findings": {
+    "fp32_result": "SAFE — no NaN, no Inf",
+    "fp32_peak_vram_mb": 163.67,
+    "fp32_latency_ms": 10.58,
+    "fp16_result": "UNSAFE — NaN in band 4 (B08/NIR)",
+    "fp16_root_cause": "HardConstraint uses torch.fft.fftn on half-precision tensors (ComplexHalf), which is experimental and unsupported on RTX 3050 + CUDA 12.1 + PyTorch 2.3. cuDNN also reports CUDNN_STATUS_NOT_SUPPORTED for the Conv operation.",
+    "fp16_peak_vram_mb": 98.51,
+    "fp16_latency_ms": 216.77,
+    "decision": "fp32 required. fp16 disabled for this model on this hardware configuration."
+  },
+
+  "affine_transform": {
+    "formula": "Affine(a/4, b/4, c, d/4, e/4, f)",
+    "note": "Full 6-parameter linear scaling. No north-up assumption. Origin (c,f) invariant.",
+    "verified_invariants": [
+      "origin_preserved",
+      "spatial_extent_preserved",
+      "pixel_size_divided_by_4",
+      "rotated_transform_supported"
+    ]
+  },
+
+  "pytest": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0,
+    "command": "env PYTHONPATH='' /home/tushar/miniconda3/envs/sr/bin/python -m pytest tests/test_run_sen2sr.py -v",
+    "tests": [
+      "TestBandPermutation::test_numpy_3d_permutation",
+      "TestBandPermutation::test_torch_4d_permutation",
+      "TestAffineTransformScaling::test_north_up_transform",
+      "TestAffineTransformScaling::test_rotated_and_sheared_transform",
+      "TestInputValidation::test_missing_file_raises_error",
+      "TestInputValidation::test_invalid_band_count_raises_error",
+      "TestEndToEndInference::test_run_sen2sr_e2e",
+      "TestEndToEndInference::test_run_sen2sr_fp16_nan_on_this_gpu",
+      "TestEndToEndInference::test_run_sen2sr_large_image"
+    ]
+  },
+
+  "human_verification_command": "env PYTHONPATH='' /home/tushar/miniconda3/envs/sr/bin/python -m pytest tests/test_run_sen2sr.py -v",
+
+  "known_limitations": [
+    "fp16 (AMP autocast) produces NaN in B08 band due to ComplexHalf in FFT HardConstraint.",
+    "predict_large from sen2sr.utils has an output shape bug (uses X.shape[1] for both dims — assumes square input). Confirmed safe for square inputs only.",
+    "The model's HardConstraint mask is fixed at 512x512, requiring exactly 128x128 LR input tiles. Smaller inputs use replicate padding.",
+    "Python runtime is 3.10.21 (NV_6939 env), not 3.11 as specified in project rules. The 'sr' env is a symlink to NV_6939. A Python 3.11 env should be created when convenient."
+  ],
+
+  "t1_1_gate_status": "PASS"
+}
