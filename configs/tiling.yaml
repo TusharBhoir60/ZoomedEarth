@@ -1,0 +1,4 @@
+tiling:
+  tile_size: 128
+  overlap: 16
+  edge_policy: "pad"

@@ -1,0 +1,40 @@
+aois:
+  - id: aoi_delhi_urban
+    name: Delhi NCR Dense Urban
+    state: Delhi
+    category: urban
+    bbox: [77.10, 28.55, 77.30, 28.75]
+    search_date_range: "2023-01-01/2023-03-31"
+    max_cloud_cover: 5
+
+  - id: aoi_mumbai_urban
+    name: Mumbai Dense Urban
+    state: Maharashtra
+    category: urban
+    bbox: [72.80, 18.90, 72.95, 19.10]
+    search_date_range: "2023-01-01/2023-03-31"
+    max_cloud_cover: 5
+
+  - id: aoi_pune_peri_urban
+    name: Pune Outskirts
+    state: Maharashtra
+    category: peri_urban
+    bbox: [73.95, 18.55, 74.15, 18.75]
+    search_date_range: "2023-01-01/2023-03-31"
+    max_cloud_cover: 5
+
+  - id: aoi_assam_flood
+    name: Brahmaputra Flood Plain
+    state: Assam
+    category: flood
+    bbox: [91.50, 26.10, 91.80, 26.40]
+    search_date_range: "2023-10-01/2023-12-31"
+    max_cloud_cover: 10
+
+  - id: aoi_kochi_coastal
+    name: Kochi Coastal
+    state: Kerala
+    category: coastal
+    bbox: [76.20, 9.90, 76.40, 10.10]
+    search_date_range: "2023-01-01/2023-03-31"
+    max_cloud_cover: 10
