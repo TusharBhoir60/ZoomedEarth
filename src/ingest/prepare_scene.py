@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Any, Tuple
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
 
 from src.ingest.preprocess import CANONICAL_BANDS, to_reflectance
 
@@ -61,7 +62,9 @@ def validate_and_read_grids(item_id: str, cache_dir: str) -> Tuple[Dict[str, np.
     reference_profile = None
     raster_data = {}
     
-    for f in required_files:
+    # 1. Process 10m spectral bands to set reference spatial profile
+    spectral_files = ["B02.tif", "B03.tif", "B04.tif", "B08.tif"]
+    for f in spectral_files:
         band_name = f.replace(".tif", "")
         with rasterio.open(base_dir / f) as src:
             profile = src.profile
@@ -81,11 +84,25 @@ def validate_and_read_grids(item_id: str, cache_dir: str) -> Tuple[Dict[str, np.
                 
             raster_data[band_name] = src.read(1)
             
+    # 2. Process SCL (resample 20m -> 10m using nearest neighbor if needed)
+    with rasterio.open(base_dir / "SCL.tif") as src:
+        if src.crs != reference_profile["crs"]:
+            raise ValueError(f"SCL.tif CRS {src.crs} does not match reference CRS")
+        if src.width == reference_profile["width"] and src.height == reference_profile["height"]:
+            raster_data["SCL"] = src.read(1)
+        else:
+            raster_data["SCL"] = src.read(
+                1,
+                out_shape=(reference_profile["height"], reference_profile["width"]),
+                resampling=Resampling.nearest
+            )
+            
     return raster_data, reference_profile
 
 def prepare_scene(item_id: str, raw_cache_dir: str = "data/raw/sentinel2", processed_dir: str = "data/processed/sentinel2") -> None:
     """
     Produce a geospatially consistent, masked, 10m prepared-scene layer.
+    Memory-efficient: processes band by band to stay well within RAM limits.
     """
     # 1. Load metadata and extract product conversion parameters
     t23_metadata = load_t23_metadata(item_id, raw_cache_dir)
@@ -94,47 +111,53 @@ def prepare_scene(item_id: str, raw_cache_dir: str = "data/raw/sentinel2", proce
     # 2. Validate grids and read arrays
     raster_data, profile = validate_and_read_grids(item_id, raw_cache_dir)
     
-    # 3. Create boolean cloud mask from SCL
-    scl = raster_data["SCL"]
-    cloud_mask = np.isin(scl, MASK_CLASSES)
-    
-    # 4. Prepare canonical stack
-    band_array = np.stack([raster_data[b] for b in CANONICAL_BANDS], axis=0)
-    
-    # Convert to reflectance using T2.1 contract
-    # DN=0 becomes np.nan inside to_reflectance
-    reflectance = to_reflectance(band_array, boa_add_offset, quantification_value, nodata_value=0.0)
-    
-    # Apply explicit representation (NaN) for SCL-masked pixels
-    reflectance[:, cloud_mask] = np.nan
-    
-    # 5. Output
     out_dir = Path(processed_dir) / item_id
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    out_profile = profile.copy()
-    out_profile.update(dtype=rasterio.float32, nodata=np.nan, count=1)
+    # 3. Create boolean cloud mask from SCL
+    scl = raster_data.pop("SCL")
+    cloud_mask = np.isin(scl, MASK_CLASSES)
     
-    # Write canonical spectral bands
-    for i, band in enumerate(CANONICAL_BANDS):
-        out_path = out_dir / f"{band}.tif"
-        with rasterio.open(out_path, "w", **out_profile) as dst:
-            dst.write(reflectance[i], 1)
-            
-    # Write unadulterated SCL and the explicit binary cloud_mask
+    # Write SCL.tif and cloud_mask.tif
     mask_profile = profile.copy()
     mask_profile.update(dtype=rasterio.uint8, nodata=None, count=1)
     
     with rasterio.open(out_dir / "SCL.tif", "w", **mask_profile) as dst:
         dst.write(scl, 1)
-        
+    del scl
+    
     with rasterio.open(out_dir / "cloud_mask.tif", "w", **mask_profile) as dst:
         dst.write(cloud_mask.astype(np.uint8), 1)
         
-    # 6. Generate provenance and statistics
+    # 4. Process each spectral band one by one to conserve RAM
+    out_profile = profile.copy()
+    out_profile.update(dtype=rasterio.float32, nodata=np.nan, count=1)
+    
+    for band in CANONICAL_BANDS:
+        band_dn = raster_data.pop(band) # uint16 array (H, W)
+        band_float = band_dn.astype(np.float32)
+        nodata_mask = (band_dn == 0)
+        del band_dn
+        
+        # Apply reflectance formula: (DN + boa_add_offset) / quantification_value
+        band_reflectance = (band_float + boa_add_offset) / quantification_value
+        del band_float
+        
+        band_reflectance[nodata_mask] = np.nan
+        del nodata_mask
+        
+        band_reflectance[cloud_mask] = np.nan
+        
+        out_path = out_dir / f"{band}.tif"
+        with rasterio.open(out_path, "w", **out_profile) as dst:
+            dst.write(band_reflectance, 1)
+        del band_reflectance
+        
+    # 5. Generate provenance and statistics
     valid_pixels = int(np.sum(~cloud_mask))
     masked_pixels = int(np.sum(cloud_mask))
     total_pixels = cloud_mask.size
+    del cloud_mask
     
     metadata = {
         "item_id": item_id,

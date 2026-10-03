@@ -8,7 +8,7 @@ import json
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 import pystac_client
 
@@ -33,6 +33,44 @@ def download_file(url: str, dest_path: Path) -> None:
             os.remove(temp_path)
         raise RuntimeError(f"Failed to download {url}: {str(e)}")
 
+def extract_reflectance_metadata(item: Any) -> Tuple[float, float]:
+    """
+    Extract BOA_ADD_OFFSET and QUANTIFICATION_VALUE from STAC item properties or assets.
+    """
+    props = getattr(item, "properties", {}) or {}
+    
+    # Quantification value
+    qv = props.get("s2:quantification_value") or props.get("quantification_value")
+    if qv is None:
+        blue_asset = item.assets.get("blue") or item.assets.get("B02")
+        if blue_asset:
+            extra = getattr(blue_asset, "extra_fields", {}) or {}
+            raster_bands = extra.get("raster:bands", [])
+            if raster_bands and isinstance(raster_bands[0], dict) and "scale" in raster_bands[0]:
+                scale = raster_bands[0]["scale"]
+                if scale > 0:
+                    qv = 1.0 / scale
+    if qv is None:
+        qv = 10000.0
+        
+    # BOA add offset
+    offset = props.get("s2:boa_add_offset") or props.get("boa_add_offset")
+    if offset is None:
+        blue_asset = item.assets.get("blue") or item.assets.get("B02")
+        if blue_asset:
+            extra = getattr(blue_asset, "extra_fields", {}) or {}
+            raster_bands = extra.get("raster:bands", [])
+            if raster_bands and isinstance(raster_bands[0], dict) and "offset" in raster_bands[0]:
+                offset_val = raster_bands[0]["offset"]
+                offset = offset_val * float(qv)
+    if offset is None:
+        if props.get("earthsearch:boa_offset_applied") or (str(props.get("s2:processing_baseline", "00.00")) >= "04.00"):
+            offset = -1000.0
+        else:
+            offset = 0.0
+            
+    return float(offset), float(qv)
+
 def resolve_and_download_assets(selection_metadata: Dict[str, Any], cache_dir: str = "data/raw/sentinel2") -> Dict[str, Any]:
     """
     Given the T2.2 selection metadata, download the required assets.
@@ -56,6 +94,9 @@ def resolve_and_download_assets(selection_metadata: Dict[str, Any], cache_dir: s
     # 3. Verify and resolve required assets
     verify_required_assets(item, provider_url)
     
+    # 4. Extract reflectance metadata
+    boa_add_offset, quantification_value = extract_reflectance_metadata(item)
+    
     mapping = get_asset_mapping(provider_url)
     asset_records = []
     
@@ -66,9 +107,12 @@ def resolve_and_download_assets(selection_metadata: Dict[str, Any], cache_dir: s
         
         local_path = item_cache_dir / f"{band}.tif"
         
-        # 4. Cache behavior
+        # 5. Cache behavior
         if not validate_cached_file(local_path):
+            print(f"  Downloading band {band} to {local_path}...", flush=True)
             download_file(href, local_path)
+        else:
+            print(f"  Using cached band {band} at {local_path}", flush=True)
             
         # Record metadata
         asset_records.append({
@@ -78,7 +122,7 @@ def resolve_and_download_assets(selection_metadata: Dict[str, Any], cache_dir: s
             "file_size_bytes": local_path.stat().st_size
         })
         
-    # 5. Save metadata.json
+    # 6. Save metadata.json
     download_timestamp = datetime.now(timezone.utc).isoformat()
     
     cache_metadata = {
@@ -87,6 +131,8 @@ def resolve_and_download_assets(selection_metadata: Dict[str, Any], cache_dir: s
         "provider_url": provider_url,
         "acquisition_datetime": selection_metadata["acquisition_datetime"],
         "download_timestamp": download_timestamp,
+        "boa_add_offset": boa_add_offset,
+        "quantification_value": quantification_value,
         "assets": asset_records,
         "download_version": "v1.0"
     }

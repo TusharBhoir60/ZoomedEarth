@@ -20,6 +20,7 @@ import torch
 
 from src.infer.run_sen2sr import (
     permute_bgrn_to_rgbn,
+    permute_rgbn_to_bgrn,
     load_sen2sr_lite_model,
     scale_affine_transform,
 )
@@ -270,8 +271,9 @@ def infer_tile(
 
     inference_duration_s = time.perf_counter() - t0
 
-    # 6. Convert output tensor to numpy
-    output_arr = output_tensor.float().numpy()  # (4, H*4, W*4)
+    # 6. Convert output tensor to numpy and unpermute from RGBN to BGRN
+    output_arr_rgbn = output_tensor.float().numpy()  # (4, H*4, W*4)
+    output_arr = permute_rgbn_to_bgrn(output_arr_rgbn)
 
     # 7. Output validation
     validate_output(output_arr, profile)
@@ -314,12 +316,22 @@ def infer_tile(
         "model_version_or_identifier": "NonReference_RGBN_x4",
         "input_band_order": INPUT_BANDS,
         "model_band_order": MODEL_BAND_ORDER,
+        "output_band_order": INPUT_BANDS,
         "input_width": W_in,
         "input_height": H_in,
         "output_width": out_W,
         "output_height": out_H,
         "input_resolution": "10m",
         "output_resolution": "2.5m",
+        "scale_factor": SCALE,
+        "nodata_policy": "NaN values replaced with 0.0 before inference",
+        "normalization_policy": "not_documented",
+        "clipping_policy": "not_documented",
+        "tile_size": W_in,
+        "tile_overlap": "not_documented",
+        "tile_stride": "not_documented",
+        "acquisition_date": "not_documented",
+        "acquisition_datetime": "not_documented",
         "crs": in_crs.to_string() if in_crs else "unknown",
         "input_transform": [in_tf.a, in_tf.b, in_tf.c, in_tf.d, in_tf.e, in_tf.f],
         "output_transform": [out_tf.a, out_tf.b, out_tf.c, out_tf.d, out_tf.e, out_tf.f],

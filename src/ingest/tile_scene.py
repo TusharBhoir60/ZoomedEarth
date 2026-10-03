@@ -53,7 +53,7 @@ def create_tiles(
         src_width = src.width
         src_height = src.height
         src_crs = src.crs.to_string() if src.crs else "unknown"
-        src_transform = src.transform
+        src_profile = src.profile.copy()
         
     n_rows = int(np.ceil((src_height - overlap) / stride)) if src_height > overlap else 1
     n_cols = int(np.ceil((src_width - overlap) / stride)) if src_width > overlap else 1
@@ -63,108 +63,150 @@ def create_tiles(
     manifest_rows = []
     split_val = get_scene_split(item_id)
     
+    tiles_info = []
     for r in range(n_rows):
         for c in range(n_cols):
             y_offset = r * stride
             x_offset = c * stride
-            
             window = Window(x_offset, y_offset, tile_size, tile_size)
-            
+            tile_transform = rasterio.windows.transform(window, src_profile["transform"])
             tile_id = f"tile_r{r:03d}_c{c:03d}"
             tile_out_dir = out_dir / tile_id
             tile_out_dir.mkdir(exist_ok=True)
             
-            cloud_mask_data = None
-            tile_transform = None
+            tiles_info.append({
+                "row": r,
+                "col": c,
+                "y_offset": y_offset,
+                "x_offset": x_offset,
+                "tile_transform": tile_transform,
+                "tile_id": tile_id,
+                "tile_out_dir": tile_out_dir
+            })
+
+    # 1. Process cloud_mask first to compute valid_fraction and create metadata
+    with rasterio.open(in_dir / "cloud_mask.tif") as src:
+        cloud_mask_full = src.read(1)
+        cm_profile = src.profile.copy()
+        
+    for tile in tiles_info:
+        r, c = tile["row"], tile["col"]
+        x_offset, y_offset = tile["x_offset"], tile["y_offset"]
+        
+        # pad with 1s (clouds)
+        cm_tile = np.ones((tile_size, tile_size), dtype=cloud_mask_full.dtype)
+        
+        scene_cols_in_tile = min(tile_size, max(0, src_width - x_offset))
+        scene_rows_in_tile = min(tile_size, max(0, src_height - y_offset))
+        
+        if scene_rows_in_tile > 0 and scene_cols_in_tile > 0:
+            cm_tile[:scene_rows_in_tile, :scene_cols_in_tile] = cloud_mask_full[
+                y_offset:y_offset+scene_rows_in_tile,
+                x_offset:x_offset+scene_cols_in_tile
+            ]
             
-            files_to_tile = BANDS + ["SCL", "cloud_mask"]
-            for f in files_to_tile:
-                src_path = in_dir / f"{f}.tif"
-                with rasterio.open(src_path) as src:
-                    if src.dtypes[0] == rasterio.float32:
-                        fill_val = np.nan
-                    else:
-                        fill_val = 1 if f == "cloud_mask" else 0
-                        
-                    data = src.read(1, window=window, boundless=True, fill_value=fill_val)
-                    
-                    if tile_transform is None:
-                        tile_transform = src.window_transform(window)
-                        
-                    out_profile = src.profile.copy()
-                    out_profile.update(
-                        width=tile_size,
-                        height=tile_size,
-                        transform=tile_transform
-                    )
-                    
-                    if f == "cloud_mask":
-                        cloud_mask_data = data
-                        
-                    with rasterio.open(tile_out_dir / f"{f}.tif", "w", **out_profile) as dst:
-                        dst.write(data, 1)
-                        
-            # Compute cloud/valid fractions only over genuine source-scene pixels.
-            # Pixels whose (row, col) in the tile window fall outside the source
-            # raster extent are padding and must not count as observations.
+        scene_pixel_count = scene_rows_in_tile * scene_cols_in_tile
+        if scene_pixel_count == 0:
+            cloud_fraction = float("nan")
+            valid_fraction = float("nan")
+        else:
+            scene_mask = cm_tile[:scene_rows_in_tile, :scene_cols_in_tile]
+            masked_scene_pixels = int(np.sum(scene_mask == 1))
+            valid_scene_pixels = scene_pixel_count - masked_scene_pixels
+            cloud_fraction = masked_scene_pixels / scene_pixel_count
+            valid_fraction = valid_scene_pixels / scene_pixel_count
+            
+        out_profile = cm_profile.copy()
+        out_profile.update(
+            width=tile_size,
+            height=tile_size,
+            transform=tile["tile_transform"]
+        )
+        with rasterio.open(tile["tile_out_dir"] / "cloud_mask.tif", "w", **out_profile) as dst:
+            dst.write(cm_tile, 1)
+            
+        bounds = rasterio.transform.array_bounds(tile_size, tile_size, tile["tile_transform"])
+        tile_transform = tile["tile_transform"]
+        
+        meta = {
+            "item_id": item_id,
+            "tile_id": tile["tile_id"],
+            "source_scene": str(in_dir),
+            "row": r,
+            "column": c,
+            "window": [x_offset, y_offset, tile_size, tile_size],
+            "width": tile_size,
+            "height": tile_size,
+            "crs": src_crs,
+            "transform": [tile_transform.a, tile_transform.b, tile_transform.c,
+                          tile_transform.d, tile_transform.e, tile_transform.f],
+            "resolution": "10m",
+            "band_order": BANDS,
+            "tile_size": tile_size,
+            "overlap": overlap,
+            "scene_pixel_count": scene_pixel_count,
+            "cloud_fraction": cloud_fraction,
+            "valid_fraction": valid_fraction,
+            "tiling_version": "v1.0"
+        }
+        with open(tile["tile_out_dir"] / "metadata.json", "w") as f:
+            json.dump(meta, f, indent=2)
+            
+        manifest_rows.append({
+            "tile_id": tile["tile_id"],
+            "item_id": item_id,
+            "row": r,
+            "column": c,
+            "x_offset": x_offset,
+            "y_offset": y_offset,
+            "width": tile_size,
+            "height": tile_size,
+            "minx": bounds[0],
+            "miny": bounds[1],
+            "maxx": bounds[2],
+            "maxy": bounds[3],
+            "cloud_fraction": cloud_fraction,
+            "valid_fraction": valid_fraction,
+            "crs": src_crs,
+            "split": split_val
+        })
+        
+    del cloud_mask_full # free memory before next bands
+    
+    # 2. Process other bands band-by-band
+    files_to_tile = BANDS + ["SCL"]
+    for f in files_to_tile:
+        src_path = in_dir / f"{f}.tif"
+        with rasterio.open(src_path) as src:
+            full_data = src.read(1)
+            profile = src.profile.copy()
+            
+        is_float = profile["dtype"] == rasterio.float32
+        fill_val = np.nan if is_float else 0
+        
+        for tile in tiles_info:
+            x_offset, y_offset = tile["x_offset"], tile["y_offset"]
+            
+            tile_data = np.full((tile_size, tile_size), fill_val, dtype=full_data.dtype)
             scene_cols_in_tile = min(tile_size, max(0, src_width - x_offset))
             scene_rows_in_tile = min(tile_size, max(0, src_height - y_offset))
-            scene_pixel_count = scene_rows_in_tile * scene_cols_in_tile
             
-            if scene_pixel_count == 0:
-                cloud_fraction = float("nan")
-                valid_fraction = float("nan")
-            else:
-                scene_mask = cloud_mask_data[:scene_rows_in_tile, :scene_cols_in_tile]
-                masked_scene_pixels = int(np.sum(scene_mask == 1))
-                valid_scene_pixels = scene_pixel_count - masked_scene_pixels
-                cloud_fraction = masked_scene_pixels / scene_pixel_count
-                valid_fraction = valid_scene_pixels / scene_pixel_count
-            
-            bounds = rasterio.transform.array_bounds(tile_size, tile_size, tile_transform)
-            
-            meta = {
-                "item_id": item_id,
-                "tile_id": tile_id,
-                "source_scene": str(in_dir),
-                "row": r,
-                "column": c,
-                "window": [x_offset, y_offset, tile_size, tile_size],
-                "width": tile_size,
-                "height": tile_size,
-                "crs": src_crs,
-                "transform": [tile_transform.a, tile_transform.b, tile_transform.c,
-                              tile_transform.d, tile_transform.e, tile_transform.f],
-                "resolution": "10m",
-                "band_order": BANDS,
-                "tile_size": tile_size,
-                "overlap": overlap,
-                "scene_pixel_count": scene_pixel_count,
-                "cloud_fraction": cloud_fraction,
-                "valid_fraction": valid_fraction,
-                "tiling_version": "v1.0"
-            }
-            with open(tile_out_dir / "metadata.json", "w") as f:
-                json.dump(meta, f, indent=2)
+            if scene_rows_in_tile > 0 and scene_cols_in_tile > 0:
+                tile_data[:scene_rows_in_tile, :scene_cols_in_tile] = full_data[
+                    y_offset:y_offset+scene_rows_in_tile,
+                    x_offset:x_offset+scene_cols_in_tile
+                ]
                 
-            manifest_rows.append({
-                "tile_id": tile_id,
-                "item_id": item_id,
-                "row": r,
-                "column": c,
-                "x_offset": x_offset,
-                "y_offset": y_offset,
-                "width": tile_size,
-                "height": tile_size,
-                "minx": bounds[0],
-                "miny": bounds[1],
-                "maxx": bounds[2],
-                "maxy": bounds[3],
-                "cloud_fraction": cloud_fraction,
-                "valid_fraction": valid_fraction,
-                "crs": src_crs,
-                "split": split_val
-            })
+            out_profile = profile.copy()
+            out_profile.update(
+                width=tile_size,
+                height=tile_size,
+                transform=tile["tile_transform"]
+            )
+            with rasterio.open(tile["tile_out_dir"] / f"{f}.tif", "w", **out_profile) as dst:
+                dst.write(tile_data, 1)
+                
+        del full_data
             
     manifest_rows.sort(key=lambda x: (x["row"], x["column"], x["tile_id"]))
     
