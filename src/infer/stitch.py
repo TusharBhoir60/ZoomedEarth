@@ -73,11 +73,35 @@ def stitch_scene(item_id: str,
             "x_offset": c,
             "y_offset": r,
             "width": tile_meta["output_width"],
-            "height": tile_meta["output_height"]
+            "height": tile_meta["output_height"],
+            "output_band_order": tile_meta.get("output_band_order"),
+            "band_order_contract_version": tile_meta.get("band_order_contract_version"),
         })
         
     # Sort tiles top-to-bottom, left-to-right
     tiles_info.sort(key=lambda t: (t["y_offset"], t["x_offset"]))
+
+    # Validate band-order contract: all tiles must agree and be canonical
+    CANONICAL_BAND_ORDER = ["B02", "B03", "B04", "B08"]
+    CONTRACT_VERSION = "v1.0"
+    for t in tiles_info:
+        if t["output_band_order"] is None:
+            raise ValueError(
+                f"Tile {t['path'].parent.name} metadata is missing output_band_order. "
+                "This may be a legacy or quarantined tile. Re-run inference to generate updated metadata."
+            )
+        if t["band_order_contract_version"] is None:
+            raise ValueError(
+                f"Tile {t['path'].parent.name} metadata is missing band_order_contract_version. "
+                "Re-run inference to generate updated metadata."
+            )
+        if t["output_band_order"] != CANONICAL_BAND_ORDER:
+            raise ValueError(
+                f"Tile {t['path'].parent.name} output_band_order {t['output_band_order']} "
+                f"!= canonical {CANONICAL_BAND_ORDER}."
+            )
+
+    output_band_order = CANONICAL_BAND_ORDER
     
     output_path = sr_dir / "SEN2SR_scene.tif"
     out_profile = {
@@ -184,7 +208,10 @@ def stitch_scene(item_id: str,
         "item_id": item_id,
         "source_tile_directory": str(sr_dir),
         "source_scene": str(Path(processed_dir) / item_id),
-        "band_order": ["B02", "B03", "B04", "B08"],
+        "input_band_order": ["B02", "B03", "B04", "B08"],
+        "model_band_order": ["B04", "B03", "B02", "B08"],
+        "output_band_order": output_band_order,
+        "band_order_contract_version": CONTRACT_VERSION,
         "input_resolution": "10m",
         "output_resolution": "2.5m",
         "crs": in_crs,

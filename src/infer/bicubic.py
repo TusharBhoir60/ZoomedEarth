@@ -31,6 +31,9 @@ from rasterio.enums import Resampling
 from rasterio.crs import CRS
 from rasterio.transform import Affine
 
+CANONICAL_BAND_ORDER = ["B02", "B03", "B04", "B08"]
+BAND_ORDER_CONTRACT_VERSION = "v1.0"
+
 # NOTE: scale_affine_transform is intentionally inlined here so bicubic.py
 # is self-contained for both `python -m pytest` and direct CLI invocation.
 # The formula is identical to run_sen2sr.scale_affine_transform (see docs/DECISIONS.md D004).
@@ -192,6 +195,10 @@ def run_bicubic(
         "resampling": "cubic",
         "scale": scale,
         "latency_ms": round(latency_ms, 2),
+        "input_band_order": CANONICAL_BAND_ORDER,
+        "model_band_order": None,  # bicubic is band-agnostic; no permutation applied
+        "output_band_order": CANONICAL_BAND_ORDER,
+        "band_order_contract_version": BAND_ORDER_CONTRACT_VERSION,
         "in_transform": {
             "a": in_transform.a,
             "b": in_transform.b,

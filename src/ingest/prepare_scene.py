@@ -11,7 +11,8 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 
-from src.ingest.preprocess import CANONICAL_BANDS, to_reflectance
+from src.ingest.preprocess import CANONICAL_BANDS, dn_to_reflectance, resolve_boa_offset
+import shutil
 
 # SCL Masking Policy
 # The following classes represent invalid pixels for clear-surface observations.
@@ -32,8 +33,8 @@ def load_t23_metadata(item_id: str, cache_dir: str = "data/raw/sentinel2") -> Di
     with open(metadata_path, "r") as f:
         return json.load(f)
 
-def get_product_metadata(item_id: str, cache_dir: str = "data/raw/sentinel2") -> Tuple[float, float]:
-    """Extract BOA_ADD_OFFSET and QUANTIFICATION_VALUE from local cache metadata."""
+def get_product_metadata(item_id: str, cache_dir: str = "data/raw/sentinel2") -> Tuple[float, float, Any, str]:
+    """Extract Reflectance conversion inputs."""
     metadata_path = Path(cache_dir) / item_id / "metadata.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"T2.3 cache metadata not found for {item_id}.")
@@ -41,14 +42,16 @@ def get_product_metadata(item_id: str, cache_dir: str = "data/raw/sentinel2") ->
     with open(metadata_path, "r") as f:
         meta = json.load(f)
         
-    if "boa_add_offset" not in meta or "quantification_value" not in meta:
+    quantification_value = meta.get("quantification_value")
+    legacy_offset = meta.get("legacy_boa_add_offset", meta.get("boa_add_offset"))
+    
+    if "earthsearch:boa_offset_applied" not in meta or "s2:processing_baseline" not in meta:
         raise ValueError(
-            f"Reflectance metadata (boa_add_offset, quantification_value) is missing from "
-            f"T2.3 cache metadata for {item_id}. Network STAC access is prohibited in T2.4. "
-            "Please ensure T2.3 cache includes this metadata."
+            f"Missing required STAC fields earthsearch:boa_offset_applied or s2:processing_baseline "
+            f"for {item_id}. Please run scripts/backfill_rad1_metadata.py."
         )
         
-    return float(meta["boa_add_offset"]), float(meta["quantification_value"])
+    return float(legacy_offset), float(quantification_value), meta["earthsearch:boa_offset_applied"], str(meta["s2:processing_baseline"])
 
 def validate_and_read_grids(item_id: str, cache_dir: str) -> Tuple[Dict[str, np.ndarray], Any]:
     """Read cached assets and validate their strict 10m spatial compatibility."""
@@ -106,12 +109,18 @@ def prepare_scene(item_id: str, raw_cache_dir: str = "data/raw/sentinel2", proce
     """
     # 1. Load metadata and extract product conversion parameters
     t23_metadata = load_t23_metadata(item_id, raw_cache_dir)
-    boa_add_offset, quantification_value = get_product_metadata(item_id, raw_cache_dir)
+    legacy_offset, quantification_value, boa_offset_applied, processing_baseline = get_product_metadata(item_id, raw_cache_dir)
+    
+    eff_offset, rule_id = resolve_boa_offset(boa_offset_applied, processing_baseline)
     
     # 2. Validate grids and read arrays
     raster_data, profile = validate_and_read_grids(item_id, raw_cache_dir)
     
-    out_dir = Path(processed_dir) / item_id
+    final_out_dir = Path(processed_dir) / item_id
+    out_dir = Path(processed_dir) / f"{item_id}.tmp"
+    
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
     # 3. Create boolean cloud mask from SCL
@@ -133,25 +142,54 @@ def prepare_scene(item_id: str, raw_cache_dir: str = "data/raw/sentinel2", proce
     out_profile = profile.copy()
     out_profile.update(dtype=rasterio.float32, nodata=np.nan, count=1)
     
+    reflectance_conversion = {
+        "legacy_boa_add_offset": legacy_offset,
+        "effective_boa_add_offset": eff_offset,
+        "rule_id": rule_id,
+        "boa_offset_applied": boa_offset_applied,
+        "processing_baseline": processing_baseline,
+        "quantification_value": quantification_value,
+        "negative_fraction_by_band": {},
+        "p01_by_band": {},
+        "guard_threshold": 0.05
+    }
+    
+    guard_errors = []
+    
     for band in CANONICAL_BANDS:
         band_dn = raster_data.pop(band) # uint16 array (H, W)
-        band_float = band_dn.astype(np.float32)
-        nodata_mask = (band_dn == 0)
+        
+        band_reflectance = dn_to_reflectance(
+            band_dn,
+            boa_add_offset=eff_offset,
+            quantification_value=quantification_value,
+            nodata_value=0
+        )
         del band_dn
         
-        # Apply reflectance formula: (DN + boa_add_offset) / quantification_value
-        band_reflectance = (band_float + boa_add_offset) / quantification_value
-        del band_float
-        
-        band_reflectance[nodata_mask] = np.nan
-        del nodata_mask
-        
         band_reflectance[cloud_mask] = np.nan
+        
+        # Decimated guard sample — stride adapts to image size (min 1)
+        stride = max(1, min(band_reflectance.shape[0], band_reflectance.shape[1]) // 10)
+        sample = band_reflectance[::stride, ::stride]
+        valid_sample = sample[~np.isnan(sample)]
+        if valid_sample.size > 0:
+            neg_frac = float(np.mean(valid_sample < 0))
+            p01 = float(np.percentile(valid_sample, 0.1))
+            reflectance_conversion["negative_fraction_by_band"][band] = neg_frac
+            reflectance_conversion["p01_by_band"][band] = p01
+            
+            if neg_frac > 0.05:
+                guard_errors.append(f"{band} negative fraction {neg_frac:.2%} > 5% limit (offset: {eff_offset}, rule: {rule_id})")
         
         out_path = out_dir / f"{band}.tif"
         with rasterio.open(out_path, "w", **out_profile) as dst:
             dst.write(band_reflectance, 1)
         del band_reflectance
+        
+    if guard_errors:
+        shutil.rmtree(out_dir)
+        raise ValueError("Reflectance Guard Failed:\n" + "\n".join(guard_errors))
         
     # 5. Generate provenance and statistics
     valid_pixels = int(np.sum(~cloud_mask))
@@ -178,11 +216,16 @@ def prepare_scene(item_id: str, raw_cache_dir: str = "data/raw/sentinel2", proce
         "valid_pixel_count": valid_pixels,
         "masked_pixel_count": masked_pixels,
         "mask_fraction": masked_pixels / total_pixels if total_pixels > 0 else 0,
-        "preparation_version": "v1.0"
+        "preparation_version": "v1.1",
+        "reflectance_conversion": reflectance_conversion
     }
     
     with open(out_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
+        
+    if final_out_dir.exists():
+        shutil.rmtree(final_out_dir)
+    os.rename(out_dir, final_out_dir)
 
 def cli_main():
     import argparse

@@ -42,3 +42,18 @@
 - Inputs == 128×128: direct model pass.  
 - Inputs < 128: replicate-pad to 128, infer, crop output to `H×4, W×4`.  
 - Inputs > 128: use official `sen2sr.predict_large()` (128-tile chunking with 32px overlap).  
+
+---
+
+## D008 — Reflectance Offset Handling & Guard (2026-10-05)
+
+**Context**: TASK RAD-1 (Fix reflectance offset handling for Earth Search L2A).
+**Decision**: 
+1. `resolve_boa_offset()` strictly determines the BOA offset from `earthsearch:boa_offset_applied` and `s2:processing_baseline`, rather than blindly trusting the legacy extracted offset.
+2. We enforce a guard where if >5% of valid pixels in any spectral band are negative after conversion, preparation aborts.
+**Evidence**:
+- T2.3 cached `-1000` without recording its source, and it equals the STAC `raster:bands` offset divided by scale. (Hypothesis until `download.py` is reviewed).
+- The branch `applied=False`, PB ≥ `04.00` → `-1000` is unverified on real data.
+- The 5% negative check guard is one-sided (it only catches a too-large subtraction, but cannot catch an offset left in the data biased +0.1).
+**Consequence**:
+- The invalid scene `S2B_43RFM_20230203_0_L2A` processed outputs (including ~9.5k tiles and stitched scene) have been moved to quarantine. The official-sample benchmark and T1.1 FP16 results remain unaffected.

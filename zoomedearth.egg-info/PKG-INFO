@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: zoomedearth
+Version: 0.1.0
+Requires-Python: >=3.10
+Requires-Dist: torch>=2.3.0
+Requires-Dist: torchvision>=0.18.0
+Requires-Dist: sen2sr>=0.8.5
+Requires-Dist: rasterio>=1.4.4
+Requires-Dist: pystac-client>=0.9.0
+Requires-Dist: pystac>=1.15.0
+Requires-Dist: PyYAML>=6.0.1
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: safetensors>=0.8.0

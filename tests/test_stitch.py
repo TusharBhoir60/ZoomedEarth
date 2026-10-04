@@ -62,7 +62,9 @@ def test_stitch_scene_synthetic(tmp_path):
             json.dump({
                 "output_transform": [tile_tf.a, tile_tf.b, tile_tf.c, tile_tf.d, tile_tf.e, tile_tf.f],
                 "output_width": 512,
-                "output_height": 512
+                "output_height": 512,
+                "output_band_order": ["B02", "B03", "B04", "B08"],
+                "band_order_contract_version": "v1.0"
             }, f)
 
     # Tile 1: top-left (r=0, c=0)
