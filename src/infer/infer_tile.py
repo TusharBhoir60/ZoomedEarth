@@ -317,6 +317,7 @@ def infer_tile(
         "input_band_order": INPUT_BANDS,
         "model_band_order": MODEL_BAND_ORDER,
         "output_band_order": INPUT_BANDS,
+        "band_order_contract_version": "v1.0",
         "input_width": W_in,
         "input_height": H_in,
         "output_width": out_W,

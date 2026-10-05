@@ -86,6 +86,7 @@ def test_resolve_and_download_assets_success(mock_client_open, mock_urlretrieve,
     class MockAsset:
         def __init__(self, href):
             self.href = href
+            self.extra_fields = {}
             
     mock_item.assets = {
         "blue": MockAsset("http://example.com/B02.tif"),
@@ -93,6 +94,12 @@ def test_resolve_and_download_assets_success(mock_client_open, mock_urlretrieve,
         "red": MockAsset("http://example.com/B04.tif"),
         "nir": MockAsset("http://example.com/B08.tif"),
         "scl": MockAsset("http://example.com/SCL.tif")
+    }
+    
+    mock_item.properties = {
+        "s2:processing_baseline": "05.09",
+        "earthsearch:boa_offset_applied": True,
+        "updated": "2023-01-16T00:00:00Z"
     }
     
     mock_client = MagicMock()

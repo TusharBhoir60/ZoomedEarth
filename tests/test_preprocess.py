@@ -76,3 +76,34 @@ def test_invalid_nan_inf():
     
     with pytest.raises(ValueError, match="contains Inf values"):
         to_reflectance(data, boa_add_offset=0, quantification_value=10000)
+
+from src.ingest.preprocess import resolve_boa_offset, dn_to_reflectance
+
+def test_resolve_boa_offset():
+    # applied True -> 0
+    assert resolve_boa_offset(True, "05.09") == (0.0, "applied_true")
+    assert resolve_boa_offset(True, "03.01") == (0.0, "applied_true")
+    
+    # applied False + >= 04.00 -> -1000
+    assert resolve_boa_offset(False, "05.09") == (-1000.0, "applied_false_pb_ge_0400")
+    assert resolve_boa_offset(False, "04.00") == (-1000.0, "applied_false_pb_ge_0400")
+    assert resolve_boa_offset(False, "10.00") == (-1000.0, "applied_false_pb_ge_0400")
+    
+    # applied False + < 04.00 -> 0
+    assert resolve_boa_offset(False, "03.01") == (0.0, "applied_false_pb_lt_0400")
+    
+    # applied None -> error
+    with pytest.raises(ValueError, match="is missing"):
+        resolve_boa_offset(None, "05.09")
+        
+def test_dn_to_reflectance_uint16_underflow():
+    """Ensure that DN below 1000 with offset -1000 does not wrap (uint16 underflow)."""
+    # Raw DN = 200, which is < 1000
+    data = np.array([200, 1500], dtype=np.uint16)
+    res = dn_to_reflectance(data, boa_add_offset=-1000.0, quantification_value=10000.0, nodata_value=0)
+    
+    # Casting to float32 before math prevents underflow:
+    # 200 - 1000 = -800 -> -0.08
+    np.testing.assert_allclose(res[0], -0.08)
+    # 1500 - 1000 = 500 -> 0.05
+    np.testing.assert_allclose(res[1], 0.05)

@@ -125,14 +125,33 @@ def resolve_and_download_assets(selection_metadata: Dict[str, Any], cache_dir: s
     # 6. Save metadata.json
     download_timestamp = datetime.now(timezone.utc).isoformat()
     
+    props = getattr(item, "properties", {})
+    s2_processing_baseline = props.get("s2:processing_baseline")
+    earthsearch_boa_offset_applied = props.get("earthsearch:boa_offset_applied")
+    updated = props.get("updated")
+    
+    # Extract scale/offset for informational purposes
+    raster_bands_info = {}
+    for band_key in ["red", "nir"]:
+        asset = item.assets.get(band_key)
+        if asset:
+            extra = getattr(asset, "extra_fields", {}) or {}
+            rb = extra.get("raster:bands", [{}])[0]
+            raster_bands_info[band_key] = {"scale": rb.get("scale"), "offset": rb.get("offset")}
+    
     cache_metadata = {
         "item_id": item_id,
         "collection": collection,
         "provider_url": provider_url,
         "acquisition_datetime": selection_metadata["acquisition_datetime"],
         "download_timestamp": download_timestamp,
-        "boa_add_offset": boa_add_offset,
+        "legacy_boa_add_offset": boa_add_offset,
+        "legacy_offset_source": "legacy_unverified",
         "quantification_value": quantification_value,
+        "s2:processing_baseline": s2_processing_baseline,
+        "earthsearch:boa_offset_applied": earthsearch_boa_offset_applied,
+        "raster_bands_info": raster_bands_info,
+        "updated": updated,
         "assets": asset_records,
         "download_version": "v1.0"
     }

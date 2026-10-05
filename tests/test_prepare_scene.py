@@ -22,8 +22,10 @@ def mock_cache_dir(tmp_path):
     
     meta = {
         "item_id": item_id,
-        "boa_add_offset": -1000.0,
-        "quantification_value": 10000.0
+        "legacy_boa_add_offset": -1000.0,
+        "quantification_value": 10000.0,
+        "earthsearch:boa_offset_applied": True,
+        "s2:processing_baseline": "05.09"
     }
     with open(item_dir / "metadata.json", "w") as f:
         json.dump(meta, f)
@@ -67,7 +69,7 @@ def test_get_product_metadata_missing(mock_cache_dir):
     with open(meta_path, "w") as f:
         json.dump({"item_id": item_id}, f)
         
-    with pytest.raises(ValueError, match="Reflectance metadata .* is missing"):
+    with pytest.raises(ValueError, match="Missing required STAC fields"):
         get_product_metadata(item_id, cache_dir)
 
 @pytest.mark.parametrize("missing_band", ["B02", "B03", "B04", "B08", "SCL"])
@@ -142,8 +144,8 @@ def test_prepare_scene(mock_cache_dir, tmp_path):
         assert np.isnan(b02[0, 6])  # SCL=8
         assert np.isnan(b02[0, 7])  # SCL=11
         
-        # Check valid pixel conversion
-        assert np.isclose(b02[1, 1], 0.05)
+        # Check valid pixel conversion (1500 / 10000 = 0.15, offset is 0 because applied=True)
+        assert np.isclose(b02[1, 1], 0.15)
         
         # Check geotransform preserved
         assert src.transform.a == 10.0
@@ -166,3 +168,101 @@ def test_prepare_scene(mock_cache_dir, tmp_path):
         assert meta["masked_pixel_count"] == 7
         assert meta["valid_pixel_count"] == 93
         assert meta["mask_fraction"] == 0.07
+
+import unittest.mock
+import src.ingest.prepare_scene
+
+def test_prepare_scene_calls_dn_to_reflectance(mock_cache_dir, tmp_path):
+    cache_dir, item_id = mock_cache_dir
+    processed_dir = tmp_path / "processed"
+    
+    with unittest.mock.patch("src.ingest.prepare_scene.dn_to_reflectance", wraps=src.ingest.prepare_scene.dn_to_reflectance) as mock_dn:
+        prepare_scene(item_id, raw_cache_dir=cache_dir, processed_dir=str(processed_dir))
+        
+    assert mock_dn.call_count == 4
+
+def test_prepare_scene_guard_failure(mock_cache_dir, tmp_path):
+    cache_dir, item_id = mock_cache_dir
+    
+    # Force a failure: earthsearch:boa_offset_applied=False, pb=05.09 -> -1000.0 offset
+    # Data DN = 200 -> (200 - 1000) / 10000 = -0.08 -> 100% negative
+    for band in ["B02", "B03", "B04", "B08"]:
+        with rasterio.open(Path(cache_dir) / item_id / f"{band}.tif", "r+") as src:
+            data = src.read(1)
+            data[data > 0] = 200
+            src.write(data, 1)
+            
+    meta_path = Path(cache_dir) / item_id / "metadata.json"
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
+    meta["earthsearch:boa_offset_applied"] = False
+    with open(meta_path, "w") as f:
+        json.dump(meta, f)
+        
+    processed_dir = tmp_path / "processed"
+    with pytest.raises(ValueError, match="Reflectance Guard Failed"):
+        prepare_scene(item_id, raw_cache_dir=cache_dir, processed_dir=str(processed_dir))
+        
+    # Ensure no partial directory left
+    assert not (processed_dir / item_id).exists()
+    assert not (processed_dir / f"{item_id}.tmp").exists()
+
+def test_prepare_scene_legacy_offset_ignored(mock_cache_dir, tmp_path):
+    """Legacy boa_add_offset=-1000 is present but applied=True -> effective offset must be 0."""
+    cache_dir, item_id = mock_cache_dir
+    processed_dir = tmp_path / "processed"
+    
+    # Metadata has legacy_boa_add_offset=-1000 and applied=True (set in fixture)
+    prepare_scene(item_id, raw_cache_dir=cache_dir, processed_dir=str(processed_dir))
+    
+    out_dir = processed_dir / item_id
+    with open(out_dir / "metadata.json") as f:
+        meta = json.load(f)
+    
+    rc = meta["reflectance_conversion"]
+    assert rc["legacy_boa_add_offset"] == -1000.0
+    assert rc["effective_boa_add_offset"] == 0.0
+    assert rc["rule_id"] == "applied_true"
+    
+    # Valid pixel value: DN=1500, offset=0, quant=10000 -> 0.15
+    with rasterio.open(out_dir / "B02.tif") as src:
+        b02 = src.read(1)
+        assert np.isclose(b02[1, 1], 0.15)
+
+def test_prepare_scene_correct_data_passes(mock_cache_dir, tmp_path):
+    """Flag True with corrected data should pass the guard cleanly."""
+    cache_dir, item_id = mock_cache_dir
+    processed_dir = tmp_path / "processed"
+    
+    prepare_scene(item_id, raw_cache_dir=cache_dir, processed_dir=str(processed_dir))
+    
+    out_dir = processed_dir / item_id
+    assert out_dir.exists()
+    with open(out_dir / "metadata.json") as f:
+        meta = json.load(f)
+    
+    # All negative fractions should be 0
+    for band, frac in meta["reflectance_conversion"]["negative_fraction_by_band"].items():
+        assert frac == 0.0, f"{band} has unexpected negative fraction {frac}"
+
+def test_prepare_scene_metadata_fields(mock_cache_dir, tmp_path):
+    """Verify all required reflectance_conversion metadata fields are present."""
+    cache_dir, item_id = mock_cache_dir
+    processed_dir = tmp_path / "processed"
+    
+    prepare_scene(item_id, raw_cache_dir=cache_dir, processed_dir=str(processed_dir))
+    
+    with open(processed_dir / item_id / "metadata.json") as f:
+        meta = json.load(f)
+    
+    assert meta["preparation_version"] == "v1.1"
+    rc = meta["reflectance_conversion"]
+    assert "effective_boa_add_offset" in rc
+    assert "rule_id" in rc
+    assert "boa_offset_applied" in rc
+    assert "processing_baseline" in rc
+    assert "quantification_value" in rc
+    assert "negative_fraction_by_band" in rc
+    assert "p01_by_band" in rc
+    assert "guard_threshold" in rc
+    assert rc["guard_threshold"] == 0.05
