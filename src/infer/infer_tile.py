@@ -246,7 +246,7 @@ def infer_tile(
     t0 = time.perf_counter()
 
     with torch.no_grad():
-        if H_in >= 128 and W_in >= 128:
+        if H_in > 128 or W_in > 128:
             from sen2sr.utils import predict_large
             output_tensor = predict_large(
                 permuted_tensor := torch.from_numpy(permuted).to(target_device),
@@ -273,7 +273,7 @@ def infer_tile(
 
     # 6. Convert output tensor to numpy and unpermute from RGBN to BGRN
     output_arr_rgbn = output_tensor.float().numpy()  # (4, H*4, W*4)
-    output_arr = permute_rgbn_to_bgrn(output_arr_rgbn)
+    output_arr = np.ascontiguousarray(permute_rgbn_to_bgrn(output_arr_rgbn))
 
     # 7. Output validation
     validate_output(output_arr, profile)
@@ -300,10 +300,8 @@ def infer_tile(
     }
     with rasterio.open(out_raster_path, "w", **out_profile) as dst:
         dst.write(output_arr)
-        dst.set_band_description(1, "B02 - Blue (2.5m SR)")
-        dst.set_band_description(2, "B03 - Green (2.5m SR)")
-        dst.set_band_description(3, "B04 - Red (2.5m SR)")
-        dst.set_band_description(4, "B08 - NIR (2.5m SR)")
+        for i, desc in enumerate(INPUT_BANDS):
+            dst.set_band_description(i + 1, desc)
 
     # 10. Write metadata.json
     in_tf = in_transform

@@ -64,7 +64,7 @@ class TestDimensionScaling:
     def test_32x32_to_128x128(self, tmp_path):
         inp = _write_4band_raster(tmp_path / "in_32.tif", height=32, width=32)
         out = tmp_path / "out_128.tif"
-        result = run_bicubic(inp, out)
+        result = run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         assert result["input_shape"] == [4, 32, 32]
         assert result["output_shape"] == [4, 128, 128]
@@ -79,7 +79,7 @@ class TestDimensionScaling:
         """Non-square inputs must scale both dimensions independently."""
         inp = _write_4band_raster(tmp_path / "in_rect.tif", height=20, width=40)
         out = tmp_path / "out_rect.tif"
-        result = run_bicubic(inp, out)
+        result = run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         assert result["output_shape"] == [4, 80, 160]
         with rasterio.open(out) as dst:
@@ -102,7 +102,7 @@ class TestBandPreservation:
             band_values=[1000, 1500, 2000, 3000],  # B02, B03, B04, B08
         )
         out = tmp_path / "out_bands.tif"
-        run_bicubic(inp, out)
+        run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         with rasterio.open(out) as dst:
             data = dst.read()
@@ -127,7 +127,7 @@ class TestBandPreservation:
             band_values=[100, 200, 400, 800],  # 2× differences between each
         )
         out = tmp_path / "out_swap.tif"
-        run_bicubic(inp, out)
+        run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         with rasterio.open(out) as dst:
             data = dst.read()
@@ -148,7 +148,7 @@ class TestCRSPreservation:
         crs = CRS.from_epsg(32643)
         inp = _write_4band_raster(tmp_path / "in_crs.tif", crs=crs)
         out = tmp_path / "out_crs.tif"
-        run_bicubic(inp, out)
+        run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         with rasterio.open(out) as dst:
             assert dst.crs == crs
@@ -158,7 +158,7 @@ class TestCRSPreservation:
         transform = Affine(0.0001, 0.0, 77.0, 0.0, -0.0001, 28.0)
         inp = _write_4band_raster(tmp_path / "in_4326.tif", crs=crs, transform=transform)
         out = tmp_path / "out_4326.tif"
-        run_bicubic(inp, out)
+        run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         with rasterio.open(out) as dst:
             assert dst.crs == crs
@@ -177,7 +177,7 @@ class TestTransformCorrectness:
             transform=in_tf,
         )
         out = tmp_path / "out_northup.tif"
-        run_bicubic(inp, out)
+        run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         with rasterio.open(out) as dst:
             tf = dst.transform
@@ -209,7 +209,7 @@ class TestTransformCorrectness:
             transform=in_tf,
         )
         out = tmp_path / "out_rotated.tif"
-        run_bicubic(inp, out)
+        run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         with rasterio.open(out) as dst:
             tf = dst.transform
@@ -244,8 +244,8 @@ class TestDeterminism:
         out_a = tmp_path / "out_a.tif"
         out_b = tmp_path / "out_b.tif"
 
-        run_bicubic(inp, out_a)
-        run_bicubic(inp, out_b)
+        run_bicubic(inp, out_a, band_order=["B02", "B03", "B04", "B08"])
+        run_bicubic(inp, out_b, band_order=["B02", "B03", "B04", "B08"])
 
         with rasterio.open(out_a) as da, rasterio.open(out_b) as db:
             np.testing.assert_array_equal(da.read(), db.read())
@@ -258,7 +258,7 @@ class TestInputValidation:
 
     def test_missing_file_raises_file_not_found(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="Input raster not found"):
-            run_bicubic(tmp_path / "nonexistent.tif", tmp_path / "out.tif")
+            run_bicubic(tmp_path / "nonexistent.tif", tmp_path / "out.tif", band_order=["B02", "B03", "B04", "B08"])
 
     def test_wrong_band_count_raises_value_error(self, tmp_path):
         bad = tmp_path / "three_band.tif"
@@ -275,7 +275,7 @@ class TestInputValidation:
             dst.write(np.ones((3, 16, 16), dtype=np.float32))
 
         with pytest.raises(ValueError, match="exactly 4 bands"):
-            run_bicubic(bad, tmp_path / "out.tif")
+            run_bicubic(bad, tmp_path / "out.tif", band_order=["B02", "B03", "B04", "B08"])
 
     def test_missing_crs_raises_value_error(self, tmp_path):
         no_crs = tmp_path / "no_crs.tif"
@@ -290,7 +290,7 @@ class TestInputValidation:
             dst.write(np.ones((4, 16, 16), dtype=np.float32))
 
         with pytest.raises(ValueError, match="no CRS"):
-            run_bicubic(no_crs, tmp_path / "out.tif")
+            run_bicubic(no_crs, tmp_path / "out.tif", band_order=["B02", "B03", "B04", "B08"])
 
 
 # ── Test 7: Raster readability ─────────────────────────────────────────────────
@@ -310,7 +310,7 @@ class TestRasterReadability:
             band_values=[1000, 1500, 2000, 3000],
         )
         out = tmp_path / "out_full.tif"
-        result = run_bicubic(inp, out)
+        result = run_bicubic(inp, out, band_order=["B02", "B03", "B04", "B08"])
 
         assert out.exists(), "Output file was not created"
 

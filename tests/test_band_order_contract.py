@@ -135,6 +135,8 @@ def make_sr_tile(sr_dir: Path, tile_id: str, r_px: int, c_px: int,
                              tile_tf.d, tile_tf.e, tile_tf.f],
         "output_width": out_w,
         "output_height": out_h,
+        "input_band_order": ["B02", "B03", "B04", "B08"],
+        "model_band_order": ["B04", "B03", "B02", "B08"],
         "output_band_order": ["B02", "B03", "B04", "B08"],
         "band_order_contract_version": "v1.0",
     }
@@ -232,7 +234,7 @@ def test_bicubic_band_order(tmp_path):
     with rasterio.open(in_path, "w", **profile) as dst:
         dst.write(data)
 
-    result = run_bicubic(in_path, out_path)
+    result = run_bicubic(in_path, out_path, band_order=["B02", "B03", "B04", "B08"])
 
     assert result["input_band_order"] == ["B02", "B03", "B04", "B08"]
     assert result["output_band_order"] == ["B02", "B03", "B04", "B08"]
@@ -329,7 +331,7 @@ def test_stitch_rejects_legacy_tile_missing_contract(tmp_path):
             "output_height": out_h,
         }, f)
 
-    with pytest.raises(ValueError, match="missing output_band_order"):
+    with pytest.raises(ValueError, match="missing input_band_order"):
         stitch_scene(item_id,
                      processed_dir=str(tmp_path / "processed"),
                      sr_output_dir=str(tmp_path / "outputs"))
@@ -343,33 +345,45 @@ EXAMPLE_DATA = WEIGHTS_DIR / "example_data.safetensor"
 
 @pytest.mark.skipif(
     not (EXAMPLE_DATA.exists() and
-         (WEIGHTS_DIR / "sr_model.safetensor").exists() and
-         torch.cuda.is_available()),
-    reason="Requires GPU and SEN2SRLite weights + example_data.safetensor"
+         (WEIGHTS_DIR / "sr_model.safetensor").exists()),
+    reason="Requires SEN2SRLite weights + example_data.safetensor"
 )
-def test_real_model_band_diagonal_rmse(tmp_path):
+def test_real_model_equivalence(tmp_path):
     """
-    Load example LR data, run the full infer_tile pipeline with the real model,
-    box-average the SR output 4× to get a downsampled prediction, and compute
-    a 4×4 band-vs-band RMSE matrix against the input. The diagonal must be
-    the smallest element in each row (band i output most resembles band i input).
-
-    A wrong permutation would swap B02 and B04 and push those diagonal entries
-    off-diagonal — this test would have caught the original bug.
+    Equivalence test: run models/SEN2SRLite example data (model order) directly
+    through the model; run the same data permuted to canonical order through infer_tile;
+    permute the pipeline output back to model order; assert allclose (FP32).
     """
     import safetensors.torch
     from src.infer.run_sen2sr import load_sen2sr_lite_model
 
-    # Load example data — shape (1, 10, 128, 128): bands 0-3 are the RGBN LR bands
-    # in model convention. We use only the first 4 channels = [B04, B03, B02, B08]
     ex = safetensors.torch.load_file(str(EXAMPLE_DATA))
-    lr_rgbn = ex["lr"][0, :4].numpy()  # (4, 128, 128) in model order [B04,B03,B02,B08]
+    # Shape (1, 10, 128, 128): first 4 are RGBN LR bands
+    raw_model_in = ex["lr"][:, :4]  # (1, 4, 128, 128) in model order [B04, B03, B02, B08]
+    
+    # Clean input: replace NaNs with 0.0 so both paths get identical numeric input
+    raw_model_in = torch.nan_to_num(raw_model_in, nan=0.0)
 
-    # Convert to canonical order [B02, B03, B04, B08] for saving as the input tile
-    from src.infer.run_sen2sr import permute_rgbn_to_bgrn
-    lr_canonical = permute_rgbn_to_bgrn(lr_rgbn)  # (4, 128, 128)
+    # Power check: ensure the test can discriminate channels
+    ch0_mean = float(raw_model_in[0, 0].mean())
+    ch2_mean = float(raw_model_in[0, 2].mean())
+    assert abs(ch0_mean - ch2_mean) > 1e-3, "Example data channels 0 and 2 are too similar to test permutation"
 
-    # Build a tile from the canonical data
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+    model = load_sen2sr_lite_model(weights_dir=WEIGHTS_DIR, device=device)
+
+    # 1. Direct model path
+    with torch.no_grad():
+        raw_model_out = model(raw_model_in.to(device)).cpu()  # (1, 4, 512, 512)
+
+    # 2. Pipeline path
+    from src.infer.run_sen2sr import permute_rgbn_to_bgrn, permute_bgrn_to_rgbn
+    canonical_in = permute_rgbn_to_bgrn(raw_model_in.numpy()[0])  # (4, 128, 128)
+
     tile_dir = tmp_path / "real_tile"
     tile_dir.mkdir()
     tf = from_origin(500000.0, 3500000.0, 10.0, 10.0)
@@ -379,7 +393,7 @@ def test_real_model_band_diagonal_rmse(tmp_path):
 
     for i, band in enumerate(["B02", "B03", "B04", "B08"]):
         with rasterio.open(tile_dir / f"{band}.tif", "w", **f32_profile) as dst:
-            dst.write(lr_canonical[i], 1)
+            dst.write(canonical_in[i], 1)
     with rasterio.open(tile_dir / "SCL.tif", "w", **u8_profile) as dst:
         dst.write(np.full((128, 128), 4, dtype=np.uint8), 1)
     with rasterio.open(tile_dir / "cloud_mask.tif", "w", **u8_profile) as dst:
@@ -397,50 +411,19 @@ def test_real_model_band_diagonal_rmse(tmp_path):
     with open(tile_dir / "metadata.json", "w") as f:
         json.dump(meta_json, f)
 
-    # Run real inference
     out_dir = tmp_path / "sr_out"
-    device = torch.device("cuda:0")
-    model = load_sen2sr_lite_model(weights_dir=WEIGHTS_DIR, device=device)
-    infer_tile(tile_dir=tile_dir, output_dir=out_dir, model=model, device="cuda:0")
+    infer_tile(tile_dir=tile_dir, output_dir=out_dir, model=model, device=str(device))
 
-    # Read output (4, 512, 512) in canonical order [B02, B03, B04, B08]
     with rasterio.open(out_dir / "SEN2SR.tif") as src:
-        sr_out = src.read().astype(np.float64)  # (4, 512, 512)
+        out_canonical = src.read()  # (4, 512, 512)
 
-    # Box-average 4× -> (4, 128, 128)
-    sr_down = sr_out.reshape(4, 128, 4, 128, 4).mean(axis=(2, 4))
+    out_model_order = permute_bgrn_to_rgbn(out_canonical)
 
-    # Input (4, 128, 128)
-    inp = lr_canonical.astype(np.float64)
+    # Note: 1e-4 tolerance due to possible floating point non-determinism on GPU,
+    # though they should be very close.
+    np.testing.assert_allclose(out_model_order, raw_model_out.squeeze(0).numpy(), rtol=1e-4, atol=1e-4)
 
-    # Compute 4×4 RMSE matrix: rmse[i, j] = RMSE(SR band i, LR band j)
-    rmse = np.zeros((4, 4), dtype=np.float64)
-    for i in range(4):
-        for j in range(4):
-            rmse[i, j] = np.sqrt(np.mean((sr_down[i] - inp[j]) ** 2))
-
-    print("\nBand-vs-Band RMSE matrix (rows=SR output bands, cols=LR input bands):")
-    print("         B02_in   B03_in   B04_in   B08_in")
-    for i, band in enumerate(["B02", "B03", "B04", "B08"]):
-        row = "  ".join(f"{rmse[i,j]:.5f}" for j in range(4))
-        diag_marker = "<-- diagonal" if True else ""
-        print(f"  {band}_out  {row}  {diag_marker}")
-
-    # Compute RMSE for swapped permutation (B02↔B04 swapped, as the original bug did):
-    # If the forward permutation were missing, the model would receive [B02,B03,B04,B08]
-    # instead of [B04,B03,B02,B08]. The reverse permutation would then put channels back
-    # as [B02,B03,B04,B08] but the model operated on the wrong input. We simulate this
-    # by comparing rmse under identity vs under B02/B04 swap.
-    # Correct: rmse[i,i] = distance(SR_band_i, LR_band_i)
-    # Swapped: rmse[0,2] and rmse[2,0] would be the diagonal entries
-    swap_diag_rmse = np.mean([rmse[0, 0], rmse[1, 1], rmse[2, 2], rmse[3, 3]])
-    swapped_rmse = np.mean([rmse[0, 2], rmse[1, 1], rmse[2, 0], rmse[3, 3]])
-
-    print(f"\nCorrect permutation mean diagonal RMSE: {swap_diag_rmse:.5f}")
-    print(f"Swapped (B02↔B04) permutation mean diagonal RMSE: {swapped_rmse:.5f}")
-
-    assert swap_diag_rmse < swapped_rmse, (
-        f"Correct permutation (diagonal RMSE={swap_diag_rmse:.5f}) is NOT better than "
-        f"swapped permutation (RMSE={swapped_rmse:.5f}). "
-        "Band permutation contract may be broken — check permute_bgrn_to_rgbn."
-    )
+    # Negative control: assert swapped permutation does not match
+    wrong_perm = out_model_order[[2, 1, 0, 3], :, :]
+    with pytest.raises(AssertionError):
+        np.testing.assert_allclose(wrong_perm, raw_model_out.squeeze(0).numpy(), rtol=1e-4, atol=1e-4)

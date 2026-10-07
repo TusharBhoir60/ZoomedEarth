@@ -74,6 +74,8 @@ def stitch_scene(item_id: str,
             "y_offset": r,
             "width": tile_meta["output_width"],
             "height": tile_meta["output_height"],
+            "input_band_order": tile_meta.get("input_band_order"),
+            "model_band_order": tile_meta.get("model_band_order"),
             "output_band_order": tile_meta.get("output_band_order"),
             "band_order_contract_version": tile_meta.get("band_order_contract_version"),
         })
@@ -85,6 +87,10 @@ def stitch_scene(item_id: str,
     CANONICAL_BAND_ORDER = ["B02", "B03", "B04", "B08"]
     CONTRACT_VERSION = "v1.0"
     for t in tiles_info:
+        if t["input_band_order"] is None:
+            raise ValueError(f"Tile {t['path'].parent.name} metadata is missing input_band_order.")
+        if t["model_band_order"] is None:
+            raise ValueError(f"Tile {t['path'].parent.name} metadata is missing model_band_order.")
         if t["output_band_order"] is None:
             raise ValueError(
                 f"Tile {t['path'].parent.name} metadata is missing output_band_order. "
@@ -95,13 +101,27 @@ def stitch_scene(item_id: str,
                 f"Tile {t['path'].parent.name} metadata is missing band_order_contract_version. "
                 "Re-run inference to generate updated metadata."
             )
+        if t["input_band_order"] != CANONICAL_BAND_ORDER:
+            raise ValueError(f"Tile {t['path'].parent.name} input_band_order {t['input_band_order']} != canonical.")
         if t["output_band_order"] != CANONICAL_BAND_ORDER:
             raise ValueError(
                 f"Tile {t['path'].parent.name} output_band_order {t['output_band_order']} "
                 f"!= canonical {CANONICAL_BAND_ORDER}."
             )
-
-    output_band_order = CANONICAL_BAND_ORDER
+            
+        if t["input_band_order"] != tiles_info[0]["input_band_order"]:
+            raise ValueError("Mismatched input_band_order across tiles.")
+        if t["model_band_order"] != tiles_info[0]["model_band_order"]:
+            raise ValueError("Mismatched model_band_order across tiles.")
+        if t["output_band_order"] != tiles_info[0]["output_band_order"]:
+            raise ValueError("Mismatched output_band_order across tiles.")
+        if t["band_order_contract_version"] != tiles_info[0]["band_order_contract_version"]:
+            raise ValueError("Mismatched band_order_contract_version across tiles.")
+            
+    if tiles_info[0]["band_order_contract_version"] != CONTRACT_VERSION:
+        raise ValueError(
+            f"Expected contract version {CONTRACT_VERSION}, got {tiles_info[0]['band_order_contract_version']}"
+        )
     
     output_path = sr_dir / "SEN2SR_scene.tif"
     out_profile = {
@@ -130,10 +150,8 @@ def stitch_scene(item_id: str,
     t0 = time.perf_counter()
     
     with rasterio.open(output_path, "w", **out_profile) as dst:
-        dst.set_band_description(1, "B02 - Blue (2.5m SR)")
-        dst.set_band_description(2, "B03 - Green (2.5m SR)")
-        dst.set_band_description(3, "B04 - Red (2.5m SR)")
-        dst.set_band_description(4, "B08 - NIR (2.5m SR)")
+        for i, band_desc in enumerate(tiles_info[0]["output_band_order"]):
+            dst.set_band_description(i + 1, band_desc)
 
         def flush_buffer(end_y: int):
             nonlocal buffer_start_y
@@ -208,10 +226,10 @@ def stitch_scene(item_id: str,
         "item_id": item_id,
         "source_tile_directory": str(sr_dir),
         "source_scene": str(Path(processed_dir) / item_id),
-        "input_band_order": ["B02", "B03", "B04", "B08"],
-        "model_band_order": ["B04", "B03", "B02", "B08"],
-        "output_band_order": output_band_order,
-        "band_order_contract_version": CONTRACT_VERSION,
+        "input_band_order": tiles_info[0]["input_band_order"],
+        "model_band_order": tiles_info[0]["model_band_order"],
+        "output_band_order": tiles_info[0]["output_band_order"],
+        "band_order_contract_version": tiles_info[0]["band_order_contract_version"],
         "input_resolution": "10m",
         "output_resolution": "2.5m",
         "crs": in_crs,

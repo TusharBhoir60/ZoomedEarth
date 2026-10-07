@@ -63,6 +63,8 @@ def test_stitch_scene_synthetic(tmp_path):
                 "output_transform": [tile_tf.a, tile_tf.b, tile_tf.c, tile_tf.d, tile_tf.e, tile_tf.f],
                 "output_width": 512,
                 "output_height": 512,
+                "input_band_order": ["B02", "B03", "B04", "B08"],
+                "model_band_order": ["B04", "B03", "B02", "B08"],
                 "output_band_order": ["B02", "B03", "B04", "B08"],
                 "band_order_contract_version": "v1.0"
             }, f)
@@ -105,7 +107,7 @@ def test_stitch_scene_synthetic(tmp_path):
         assert src.bounds.left == 700000.0
         
         # 3. Band Preservation
-        assert src.descriptions == ('B02 - Blue (2.5m SR)', 'B03 - Green (2.5m SR)', 'B04 - Red (2.5m SR)', 'B08 - NIR (2.5m SR)')
+        assert src.descriptions == ('B02', 'B03', 'B04', 'B08')
         
         # 4. NaN handling and padding
         # Check non-overlap region of tile 1 (x=0 to 447)
