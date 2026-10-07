@@ -59,19 +59,15 @@ def scale_affine_transform(transform: Affine, scale: float = 4.0) -> Affine:
 # Required band count for all Sentinel-2 RGBN inputs
 REQUIRED_BAND_COUNT = 4
 
-# Band descriptions written to output (same format as T1.1)
-BAND_DESCRIPTIONS = [
-    "B02 - Blue (2.5m)",
-    "B03 - Green (2.5m)",
-    "B04 - Red (2.5m)",
-    "B08 - NIR (2.5m)",
-]
+# Band descriptions omitted, derived dynamically
 
 
 def run_bicubic(
     input_path: Union[str, pathlib.Path],
     output_path: Union[str, pathlib.Path],
     scale: float = 4.0,
+    metadata_path: Union[str, pathlib.Path, None] = None,
+    band_order: list = None,
 ) -> Dict[str, Any]:
     """
     Execute 4× bicubic resampling on a 4-band Sentinel-2 GeoTIFF.
@@ -101,6 +97,17 @@ def run_bicubic(
     """
     input_path = pathlib.Path(input_path)
     output_path = pathlib.Path(output_path)
+
+    if band_order is None and metadata_path is None:
+        raise ValueError("Must provide either metadata_path or explicit band_order.")
+
+    if band_order is None:
+        import json
+        with open(metadata_path, "r") as f:
+            meta = json.load(f)
+        band_order = meta.get("band_order")
+        if band_order is None:
+            raise ValueError(f"metadata_path {metadata_path} lacks 'band_order'.")
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input raster not found: {input_path}")
@@ -182,7 +189,7 @@ def run_bicubic(
 
     with rasterio.open(output_path, "w", **profile) as dst:
         dst.write(normalized_data)
-        for idx, desc in enumerate(BAND_DESCRIPTIONS, start=1):
+        for idx, desc in enumerate(band_order, start=1):
             dst.set_band_description(idx, desc)
 
     return {
@@ -195,9 +202,9 @@ def run_bicubic(
         "resampling": "cubic",
         "scale": scale,
         "latency_ms": round(latency_ms, 2),
-        "input_band_order": CANONICAL_BAND_ORDER,
+        "input_band_order": band_order,
         "model_band_order": None,  # bicubic is band-agnostic; no permutation applied
-        "output_band_order": CANONICAL_BAND_ORDER,
+        "output_band_order": band_order,
         "band_order_contract_version": BAND_ORDER_CONTRACT_VERSION,
         "in_transform": {
             "a": in_transform.a,
@@ -229,6 +236,8 @@ def main():
                         help="Output 4-band 2.5m bicubic GeoTIFF")
     parser.add_argument("--scale", "-s", type=float, default=4.0,
                         help="Upsampling scale factor (default: 4.0)")
+    parser.add_argument("--band-order", nargs="+", help="Explicit band order e.g. B02 B03 B04 B08")
+    parser.add_argument("--metadata-path", help="Path to prepared-scene metadata.json")
 
     args = parser.parse_args()
 
@@ -236,6 +245,8 @@ def main():
         input_path=args.input,
         output_path=args.output,
         scale=args.scale,
+        band_order=args.band_order,
+        metadata_path=args.metadata_path,
     )
 
     print("--- Bicubic Resampling Complete ---")
