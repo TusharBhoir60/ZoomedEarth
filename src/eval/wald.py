@@ -31,7 +31,7 @@ def compute_metrics(hr: np.ndarray, sr: np.ndarray, mask: Optional[np.ndarray] =
     if mask is None:
         mask = np.ones(hr.shape[1:], dtype=bool)
         
-    valid = mask & ~np.isnan(hr[0]) & ~np.isnan(sr[0])
+    valid = mask & np.all(np.isfinite(hr), axis=0) & np.all(np.isfinite(sr), axis=0)
     
     if not np.any(valid):
         return {"error": "No valid pixels"}
