@@ -69,7 +69,7 @@ def _get_hardware_info() -> Dict[str, str]:
     return {"device": "cpu", "cuda_version": "N/A"}
 
 
-def validate_input_tile(tile_dir: Path) -> Dict[str, Any]:
+def validate_input_tile(tile_dir: Path, require_10m: bool = True) -> Dict[str, Any]:
     """
     Validate all pre-inference requirements against the T2.5 tile.
 
@@ -109,7 +109,7 @@ def validate_input_tile(tile_dir: Path) -> Dict[str, Any]:
                     )
 
             # Verify 10m resolution
-            if abs(src.transform.a) != 10.0 or abs(src.transform.e) != 10.0:
+            if require_10m and (abs(src.transform.a) != 10.0 or abs(src.transform.e) != 10.0):
                 raise ValueError(
                     f"{band}: pixel size is not 10m "
                     f"(got {abs(src.transform.a)}m × {abs(src.transform.e)}m)"
@@ -175,6 +175,7 @@ def infer_tile(
     weights_dir: Union[str, Path] = "models/SEN2SRLite",
     device: Optional[str] = None,
     model: Optional[Any] = None,
+    require_10m: bool = True,
 ) -> Dict[str, Any]:
     """
     Run SEN2SR inference on one T2.5 tile directory.
@@ -187,6 +188,7 @@ def infer_tile(
     weights_dir : SEN2SRLite model weights directory
     device : torch device string; defaults to CUDA if available
     model : pre-loaded model (for testing); if None, loads from weights_dir
+    require_10m : whether to enforce the 10m input resolution check
 
     Returns
     -------
@@ -214,7 +216,7 @@ def infer_tile(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Pre-inference validation
-    validated = validate_input_tile(tile_dir)
+    validated = validate_input_tile(tile_dir, require_10m=require_10m)
     profile = validated["profile"]
     stacked_model_in = validated["stacked_model_in"]
 
@@ -273,7 +275,11 @@ def infer_tile(
 
     # 6. Convert output tensor to numpy and unpermute from RGBN to BGRN
     output_arr_rgbn = output_tensor.float().numpy()  # (4, H*4, W*4)
-    output_arr = np.ascontiguousarray(permute_rgbn_to_bgrn(output_arr_rgbn))
+    output_arr = np.empty_like(output_arr_rgbn)
+    output_arr[0] = output_arr_rgbn[2]
+    output_arr[1] = output_arr_rgbn[1]
+    output_arr[2] = output_arr_rgbn[0]
+    output_arr[3] = output_arr_rgbn[3]
 
     # 7. Output validation
     validate_output(output_arr, profile)
