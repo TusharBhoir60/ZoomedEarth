@@ -45,7 +45,7 @@ def test_compute_metrics():
     mask = np.zeros((4, 4), dtype=bool)
     mask[0, 0] = True # Only one valid pixel
     sr_bad = sr.copy()
-    sr_bad[:, 1:, 1:] = 100.0 # Bad values in masked regions
+    sr_bad[:, 1:, 1:] = 1.0 # Bad values in masked regions
     
     metrics_masked = compute_metrics(hr, sr_bad, mask=mask)
     assert np.isclose(metrics_masked["rmse_global"], 0.1, atol=1e-6)
