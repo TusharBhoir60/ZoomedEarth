@@ -36,10 +36,19 @@ def compute_metrics(hr: np.ndarray, sr: np.ndarray, mask: Optional[np.ndarray] =
     if not np.any(valid):
         return {"error": "No valid pixels"}
         
+    # Prevent uint16 overflow and ensure reflectance space [0, 1]
+    hr_f = hr.astype(np.float64)
+    sr_f = sr.astype(np.float64)
+    
+    if np.max(hr_f) > 2.0:
+        hr_f /= 10000.0
+    if np.max(sr_f) > 2.0:
+        sr_f /= 10000.0
+        
     global_sq_err = 0.0
     for i, band in enumerate(INPUT_BANDS):
-        hr_b = hr[i][valid]
-        sr_b = sr[i][valid]
+        hr_b = hr_f[i][valid]
+        sr_b = sr_f[i][valid]
         
         mse = float(np.mean((hr_b - sr_b)**2))
         metrics[f"rmse_{band}"] = math.sqrt(mse)
@@ -51,7 +60,8 @@ def compute_metrics(hr: np.ndarray, sr: np.ndarray, mask: Optional[np.ndarray] =
     metrics["rmse_global"] = math.sqrt(mse_global)
     metrics["psnr_global"] = compute_psnr(mse_global)
     
-    metrics["sam_rad"] = compute_sam(hr, sr, mask=valid)
+    # sam computation expects [0, 1] as well, compute_sam handles normalisation internally? Let's check compute_sam
+    metrics["sam_rad"] = compute_sam(hr_f, sr_f, mask=valid)
     
     return metrics
 

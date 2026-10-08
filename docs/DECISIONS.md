@@ -57,3 +57,13 @@
 - The 5% negative check guard is one-sided (it only catches a too-large subtraction, but cannot catch an offset left in the data biased +0.1).
 **Consequence**:
 - The invalid scene `S2B_43RFM_20230203_0_L2A` processed outputs (including ~9.5k tiles and stitched scene) have been moved to quarantine. The official-sample benchmark and T1.1 FP16 results remain unaffected.
+
+---
+
+## D009 — T5.1 GAN Training Stability (2026-10-08)
+
+**Context**: T5.1 GAN finetuning scaffold preparation and stability validation.
+**Decision**: 
+1. **NaN Rejection**: The `WaldDataset` iterator performs rejection sampling on 64x64 crops. Any crop containing non-finite values (i.e. NoData boundaries) is instantly discarded. NaNs are *never* imputed or silently replaced with zeros.
+2. **FP32 Training**: Training remains unconditionally FP32 (AMP disabled). Previous D003 analysis of the `HardConstraint` and CUDA kernel behavior prohibits stable half-precision.
+3. **Scientific Limitation**: Wald 40m→10m is strictly a training proxy distribution. It does not mathematically prove deployment-scale 10m→2.5m superiority over bicubic, but is the sole authorized finetuning mechanism under Gate 3.

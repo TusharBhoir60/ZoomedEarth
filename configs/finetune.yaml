@@ -1,0 +1,27 @@
+seed: 42
+pretrained_weights: "models/SEN2SRLite"
+train_data_dir: "outputs/t3_2_wald_v0"
+# IMPORTANT SCIENTIFIC REQUIREMENT: 
+# The Wald 40m -> 10m training proxy scale does not perfectly represent the deployment 
+# 10m -> 2.5m physical problem due to differences in S2 sensor spatial and spectral physics.
+val_data_dir: "outputs/t3_2_wald_v0" # Replace if separate split available
+output_dir: "outputs/t5_1_finetune"
+crop_size: 64
+fallback_crop_size: 48
+batch_size: 4
+gradient_accumulation_steps: 4
+max_steps: 2000
+checkpoint_interval: 100
+validation_interval: 100
+learning_rate_g: 1.0e-4
+learning_rate_d: 1.0e-4
+amp_enabled: false
+loss_weights:
+  l1: 1.0
+  perceptual: 0.01
+  adversarial: 0.005
+  consistency: 0.1
+resume_checkpoint: null
+logging:
+  log_interval: 10
+  csv_file: "loss_log.csv"
