@@ -50,6 +50,30 @@ def test_compute_metrics():
     metrics_masked = compute_metrics(hr, sr_bad, mask=mask)
     assert np.isclose(metrics_masked["rmse_global"], 0.1, atol=1e-6)
 
+def test_compute_metrics_nan_filtering():
+    # Synthetic data
+    hr = np.ones((4, 4, 4), dtype=np.float32) * 0.5
+    sr = hr + 0.1
+    
+    # B02 (index 0) is finite, B08 (index 3) gets a NaN at (0, 0)
+    hr[3, 0, 0] = np.nan
+    
+    # B03 (index 1) gets an Inf at (1, 1)
+    hr[1, 1, 1] = np.inf
+    
+    # SR gets a NaN at (2, 2) on B04
+    sr[2, 2, 2] = np.nan
+    
+    metrics = compute_metrics(hr, sr)
+    
+    # Since 3 pixels are filtered out, 13 pixels should remain.
+    # The error should still be exactly 0.1 (since all valid pixels have difference 0.1)
+    assert "error" not in metrics
+    assert np.isclose(metrics["rmse_global"], 0.1, atol=1e-6)
+    for b in ["B02", "B03", "B04", "B08"]:
+        assert np.isclose(metrics[f"rmse_{b}"], 0.1, atol=1e-6)
+
+
 def test_run_wald_experiment_synthetic(tmp_path):
     hr_dir = tmp_path / "hr"
     hr_dir.mkdir()

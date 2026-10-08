@@ -67,3 +67,20 @@
 1. **NaN Rejection**: The `WaldDataset` iterator performs rejection sampling on 64x64 crops. Any crop containing non-finite values (i.e. NoData boundaries) is instantly discarded. NaNs are *never* imputed or silently replaced with zeros.
 2. **FP32 Training**: Training remains unconditionally FP32 (AMP disabled). Previous D003 analysis of the `HardConstraint` and CUDA kernel behavior prohibits stable half-precision.
 3. **Scientific Limitation**: Wald 40m→10m is strictly a training proxy distribution. It does not mathematically prove deployment-scale 10m→2.5m superiority over bicubic, but is the sole authorized finetuning mechanism under Gate 3.
+
+---
+
+## D010 — T5.2 Gate 5 CLEARED & Checkpoint Retained (2026-10-09)
+
+**Context**: T5.2 validation sweep on held-out geographic data (Pune validation AOI `aoi_pune_peri_urban`, scene `S2B_43QDA_20230114_0_L2A`) to determine if a fine-tuned checkpoint should be retained. Gate 5 requires the checkpoint to beat pretrained SEN2SR on the Wald set AND ensure consistency is not worse.
+**Decision**: KEEP fine-tuned checkpoint 200 (`outputs/t5_2_finetune/checkpoint_step_200.pt`). Gate 5 is CLEARED.
+**Evidence**:
+- **Pune Wald metrics**:
+  - Global RMSE: Step 200 = 0.016835 vs Pretrained = 0.017265 vs Bicubic = 0.017197 (Step 200 wins)
+  - Global PSNR: Step 200 = 35.518757 vs Pretrained = 35.301703 vs Bicubic = 35.333060 (Step 200 wins)
+  - SAM: Step 200 = 0.061868 vs Pretrained = 0.062298 vs Bicubic = 0.060394 (Step 200 wins against pretrained)
+- **Consistency**:
+  - RMSE_B02: Step 200 = 0.001691 vs Pretrained = 0.002602 (Step 200 strictly better)
+  - SAM_RAD: Step 200 = 0.010940 vs Pretrained = 0.016669 (Step 200 strictly better)
+  - REL_ERR_B02: Step 200 = 0.033421 vs Pretrained = 0.051417 (Step 200 strictly better)
+**Consequence**: Checkpoint 200 is confirmed as the formally selected model moving forward into Phase 6. The distinction between training-scene evaluation and geographically held-out Pune validation results must remain preserved.

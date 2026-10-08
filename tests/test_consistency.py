@@ -115,3 +115,49 @@ def test_evaluate_scene_consistency(tmp_path):
     # Since the invalid pixel was masked out, metrics should still be perfect 0
     assert np.isclose(metrics["rmse_global"], 0.0)
     assert np.isclose(metrics["sam_rad"], 0.0)
+
+def test_band_permutation():
+    # Test that swapping B02 and B04 produces a measurable failure
+    lr = np.ones((4, 2, 2), dtype=np.float32)
+    lr[0] = 1.0 # B02
+    lr[2] = 2.0 # B04
+    
+    sr = np.ones((4, 8, 8), dtype=np.float32)
+    sr[0] = 2.0 # SR B02 is what LR B04 was (swapped)
+    sr[2] = 1.0 # SR B04 is what LR B02 was
+    
+    metrics = compute_consistency_arrays(lr, sr)
+    
+    assert metrics["rmse_B02"] == 1.0
+    assert metrics["rmse_B04"] == 1.0
+    assert metrics["sam_rad"] > 0.0
+
+def test_known_perturbation():
+    # Deterministic perturbation: SR = LR + 0.1 uniformly
+    lr = np.ones((4, 2, 2), dtype=np.float32) * 0.5
+    sr = np.ones((4, 8, 8), dtype=np.float32) * 0.6
+    
+    metrics = compute_consistency_arrays(lr, sr)
+    for b in ["B02", "B03", "B04", "B08"]:
+        assert np.isclose(metrics[f"rmse_{b}"], 0.1, atol=1e-6)
+        assert np.isclose(metrics[f"rel_err_{b}"], 0.2, atol=1e-6) # 0.1 / 0.5 = 0.2
+    assert np.isclose(metrics["rmse_global"], 0.1, atol=1e-6)
+
+def test_spatial_alignment_detection():
+    # Test that a 1-pixel shift (in LR space) produces a measurable error
+    lr = np.zeros((4, 4, 4), dtype=np.float32)
+    lr[:, 2:, 2:] = 1.0
+    
+    # Perfect SR
+    sr = np.zeros((4, 16, 16), dtype=np.float32)
+    sr[:, 8:, 8:] = 1.0
+    
+    metrics_perfect = compute_consistency_arrays(lr, sr)
+    assert np.isclose(metrics_perfect["rmse_global"], 0.0)
+    
+    # Shift SR by 4 pixels (1 LR pixel) down and right
+    sr_shifted = np.zeros((4, 16, 16), dtype=np.float32)
+    sr_shifted[:, 12:, 12:] = 1.0
+    
+    metrics_shifted = compute_consistency_arrays(lr, sr_shifted)
+    assert metrics_shifted["rmse_global"] > 0.0

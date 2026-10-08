@@ -1,3 +1,13 @@
+splits:
+  train:
+    - aoi_delhi_urban
+    - aoi_assam_flood
+    - aoi_kochi_coastal
+  val:
+    - aoi_pune_peri_urban
+  test:
+    - aoi_mumbai_urban
+
 aois:
   - id: aoi_delhi_urban
     name: Delhi NCR Dense Urban
