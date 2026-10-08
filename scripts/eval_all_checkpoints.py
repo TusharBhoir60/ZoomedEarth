@@ -53,10 +53,10 @@ def find_best_checkpoint(ckpt_dir, hr_scene_dir, eval_dir):
     shared_bicubic_path = baselines_dir / "bicubic_10m.tif"
     
     def make_patched_run_bicubic():
-        def patched_run_bicubic(input_path, output_path, scale, band_order):
+        def patched_run_bicubic(input_path, output_path, *args, **kwargs):
             if not shared_bicubic_path.exists():
                 print("  [Disk-Safe] Generating shared bicubic...")
-                original_run_bicubic(input_path, shared_bicubic_path, scale, band_order)
+                original_run_bicubic(input_path, shared_bicubic_path, *args, **kwargs)
             
             output_path = Path(output_path)
             if output_path.exists() or output_path.is_symlink():
@@ -161,18 +161,25 @@ def find_best_checkpoint(ckpt_dir, hr_scene_dir, eval_dir):
                 print(f"  [Disk-Safe] Preserving temporary outputs in {step_eval_dir} for debugging.")
             raise
             
-    print(f"Best checkpoint is {best_ckpt.name} with RMSE {best_rmse}")
+    if best_ckpt is None:
+        print("Warning: All checkpoints produced NaN RMSE or failed.")
+        best_ckpt_name = "None"
+        finetuned_results = None
+    else:
+        print(f"Best checkpoint is {best_ckpt.name} with RMSE {best_rmse}")
+        best_ckpt_name = str(best_ckpt)
+        finetuned_results = {
+            "wald": results_map[best_ckpt.name]["wald"],
+            "consistency": results_map[best_ckpt.name]["consistency"]
+        }
     
     full_results = {
-        "best_checkpoint": str(best_ckpt),
+        "best_checkpoint": best_ckpt_name,
         "pretrained": {
             "wald": res_pretrained,
             "consistency": cons_pretrained
         },
-        "finetuned": {
-            "wald": results_map[best_ckpt.name]["wald"],
-            "consistency": results_map[best_ckpt.name]["consistency"]
-        },
+        "finetuned": finetuned_results,
         "all_checkpoints": results_map
     }
     
