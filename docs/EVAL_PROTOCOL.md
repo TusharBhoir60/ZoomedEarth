@@ -34,7 +34,7 @@ We evaluate pretrained (and optionally finetuned) Sentinel-2 10 m → 2.5 m SR. 
 ## 4. Fixed processing choices
 - Downsample kernel (SR→10 m, 10 m→40 m): 4x4 / 4x4 box average, documented and unit-tested.
 - Reflectance scaling and baseline-offset handling: as implemented in `src/ingest/preprocess.py`, version-pinned.
-- Grid: 2.5 m, aligned to 4x4 subpixels of the 10 m grid.
+- Grid: 2.5 m, aligned to 4x4 subpixels of the canonical 10 m L2A reference mosaic (D012).
 - Seeds: `[FILL @ W4: e.g. 3 fixed seeds]`. Report mean ± spread across seeds.
 - Software versions pinned in `requirements.txt`; git SHA logged with every result.
 
@@ -49,9 +49,16 @@ We evaluate pretrained (and optionally finetuned) Sentinel-2 10 m → 2.5 m SR. 
 - One model per input type, trained from the same initialization and seeds.
 - Crop sizes cover the same ground area (e.g. 64 px at 10 m ↔ 256 px at 2.5 m).
 - All predictions compared on the 2.5 m grid. 10 m model outputs are upsampled by nearest neighbour for scoring.
-- Labels: building footprints rasterized at 2.5 m. Source `[FILL @ W4]`, license verified. Dataset and any confidence threshold fixed.
+- Labels: building footprints rasterized at 2.5 m using pixel-center rasterization (equivalent to `all_touched=False`). Overlapping accepted polygons produce a binary `1`. Areas lacking available ground truth are labelled `255` (NoData). Missing building polygons alone must not be interpreted as evidence of non-building. Source `[FILL @ W4]`, license verified. Dataset and any confidence threshold fixed.
 - **Alignment check before use:** estimate footprint-vs-image offset by edge cross-correlation. If offset exceeds ~1 LR pixel (10 m) in an AOI, either apply a documented global shift or drop that AOI from quantitative results. Decide once, record in `DECISIONS.md`.
-- Metrics: F1, IoU, precision, recall at a fixed threshold chosen on validation blocks.
+- **Metrics (D013/D014 PU Deviation):** 
+  - Standard Precision, F1, and IoU are strictly prohibited as validated building-detection metrics since trustworthy negative labels are unavailable.
+  - Report positive-label recall and predicted-positive area fraction.
+  - **Predicted-Area Budget**: Models will be evaluated by ranking predictions and thresholding exactly `round(b × N)` eligible pixels, where `b` is the locked budget from `D014`.
+  - The budget is derived strictly as the arithmetic mean of the positive-label ratio across all eligible `train` AOIs.
+  - Test/validation outputs, imagery statistics, and models must not influence the budget.
+  - Tie-breaking must be deterministic row-major.
+  - These metrics measure the recovery of Open Buildings annotations, not true-world building recall. Standard metrics are retained ONLY for separately defined evaluation regions where independent negative reference labels exist.
 
 ## 7. Statistics
 - Unit of resampling: spatial blocks (not pixels, not tiles), since neighbouring pixels are correlated.

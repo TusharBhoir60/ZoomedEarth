@@ -84,3 +84,89 @@
   - SAM_RAD: Step 200 = 0.010940 vs Pretrained = 0.016669 (Step 200 strictly better)
   - REL_ERR_B02: Step 200 = 0.033421 vs Pretrained = 0.051417 (Step 200 strictly better)
 **Consequence**: Checkpoint 200 is confirmed as the formally selected model moving forward into Phase 6. The distinction between training-scene evaluation and geographically held-out Pune validation results must remain preserved.
+
+---
+
+## D011 — Pixel-center rasterization for T4.2 building masks (2026-10-09)
+
+**Context**: T4.2 Building-Mask Rasterization requires a strictly defined positive-pixel rule, which was previously unspecified in the evaluation protocol.
+**Decision**: 
+1. Use pixel-center rasterization, equivalent to `all_touched=False` in standard Rasterio behavior.
+2. Binary labels: A target pixel receives `1` if its center falls within the union of accepted building polygons. Overlaps must not produce counts greater than `1`.
+3. Background vs NoData: Label `0` is permitted only where the available ground-truth source supports a known non-building label. Label `255` represents NoData/unknown ground truth. Missing building polygons alone must not be interpreted as evidence of non-building.
+4. The approved 2.5 m target resolution and required alignment to the corresponding 10 m Sentinel-2 grid (including the 4×4 subpixel relationship and EPSG:32643 CRS) must be preserved.
+5. Use the existing Open Buildings V3 source (confidence `>= 0.70`). These footprints must not be described as complete land-cover truth or true high-resolution Sentinel-2 imagery.
+**Reason**: Pixel-center rasterization provides a deterministic, conservative baseline and avoids the systematic boundary expansion associated with `all_touched=True`.
+
+---
+
+## D012 — Canonical L2A Reference Grid and Mosaic Contract (2026-10-09)
+
+**Context**: T4.2 building mask rasterization requires a single 10 m evaluation reference grid per AOI. AOIs like Pune span multiple L2A MGRS tiles (e.g., `43QDA` and `43QCA`), necessitating a deterministic mosaic contract.
+**Decision**:
+1. **Grid**: EPSG:32643 at 10 m resolution.
+2. **Alignment**: The mosaic strictly inherits the native affine grid of the Sentinel-2 L2A source tiles. No reprojection, warping, or resampling is permitted. The projected AOI geometry is snapped outward to these exact pixel boundaries.
+3. **Overlap & Validity**: When merging overlapping tiles from the same pass, valid usable pixels (NaN-free, `cloud_mask == 0`) take precedence over invalid/NoData pixels (`cloud_mask == 1`). If both are valid, the first source is selected deterministically.
+4. **Output**: A single AOI-bounded mosaic is produced under `data/processed/sentinel2/mosaic_{aoi_id}`, preserving canonical bands and original provenance metadata.
+**Reason**: This provides the exact, unified, unresampled 10 m coordinate space required for the 2.5 m subpixel sub-grid in downstream evaluations.
+
+---
+
+## D013 — Positive-Unlabelled Ground-Truth Policy and T4.2 Completion (2026-10-09)
+
+**Context**: Open Buildings V3 provides positive predicted footprints but no explicitly mapped negative mask (verified non-building). D011 strictly forbids assuming missing polygons are non-building. This blocks standard Precision/F1 calculation.
+**Decision**:
+1. Open Buildings V3 is acknowledged strictly as a predicted building-footprint source.
+2. D011 pixel-center rasterization (`all_touched=False`) is preserved.
+3. Label `1` is assigned to accepted footprints (`confidence >= 0.70`).
+4. Label `0` (background) is permitted ONLY where an independent, explicitly supported non-building label exists. We DO NOT infer negative labels from missing polygons.
+5. Label `255` is assigned to unknown ground truth AND unavailable imagery (e.g., reference image clouds/NoData mask).
+6. The evaluation is strictly a Positive-Unlabelled (PU) annotation recovery task. Tier C standard precision/F1 metrics are invalid without negative labels.
+**Reason**: Adhering to the scientific reality of the positive-only dataset prevents penalizing models for finding unlabelled real buildings (false false-positives) while strictly honoring D011 and isolating test sets.
+
+---
+
+## D014 — Training-Only PU Predicted-Area Budget (2026-10-09)
+
+**Context:** Gate 4 evaluation requires a reproducible operating point for comparing Bicubic and super-resolved building predictions when Open Buildings V3 does not supply verified negative labels.
+
+**Decision:** Derive the PU predicted-area budget exclusively from eligible training AOIs with accepted Tier C annotations. For each eligible AOI, calculate the ratio of accepted positive-label pixels to valid image pixels. Set the budget to the arithmetic mean of these per-AOI ratios, giving each eligible AOI equal weight.
+
+**Label semantics:** Preserve D011 and D013. Open Buildings footprints remain positive-unlabelled annotations. Missing polygons must not be treated as known non-building pixels. Unknown ground truth remains label `255`.
+
+**Evaluation:** Apply the same frozen predicted-area fraction to Bicubic and SR. For each evaluation region, select exactly `round(b × N)` eligible pixels by descending prediction score, with deterministic row-major tie-breaking. Calculate recall against accepted positive labels and report the realized predicted-positive area fraction.
+
+**Restrictions:** The budget may use only accepted training annotations and their valid-image masks. Validation and test annotations, imagery-derived statistics, model predictions, and test outputs must not influence budget derivation. Mumbai remains strictly test-only.
+
+**Interpretation:** The budget is an annotation-derived operating point, not a claim about true building density. Incomplete positive annotations can bias it downward. Results measure recovery of accepted Open Buildings annotations and do not establish complete real-world building recall.
+
+**Reproducibility:** Record the eligible AOIs, per-AOI positive and valid pixel counts, per-AOI ratios, final budget, input hashes, and deterministic selection rules. If no eligible training AOI has accepted Tier C annotations, budget derivation fails and the evaluation remains blocked.
+
+---
+
+## D015 — Tier C Prediction Output Contract (2026-10-09)
+
+**Context:** The Tier C U-Net evaluation scorer requires a strictly defined I/O contract for model predictions before inference is implemented.
+
+**Decision:** 
+1. **Format:** Model predictions for Tier C must be saved as a single-band `float32` GeoTIFF.
+2. **Alignment:** The prediction raster MUST perfectly match the corresponding ground-truth label raster's dimensions, CRS, and affine transform (canonical 2.5m grid).
+3. **Semantics:** Higher prediction scores indicate a stronger positive building probability. Non-finite scores and NoData values must be excluded from the eligible candidate pool.
+4. **Candidate Pool (`N`):** The eligible pixel pool $N$ for selecting the top `round(b * N)` predictions is defined strictly as valid imagery pixels (excluding NoData and cloud mask pixels). Pixels with label `255` (unknown Open Buildings background) are explicitly *retained* in the candidate pool for prediction and ranking to ensure the budget denominator matches the D014 derivation rules.
+5. **No Recalibration:** The frozen `pu_area_budget.json` must be loaded without modification.
+
+**Reason:** Prevents silent grid mismatches, ensures deterministic row-major tie-breaking on standard data types, and aligns the evaluation denominator perfectly with the D014 budget derivation.
+
+---
+
+## D016 — Gate 4 Acceptance and Tier C Scorer (2026-10-09)
+
+**Context:** Gate 4 protocol review demands verified Positive-Unlabelled (PU) semantics, immutable budget alignment, and hardened spatial mapping before any Tier C inference can be authorized or scored.
+
+**Decision:** The Tier C scorer (`src/eval/tier_c.py`) is accepted and Gate 4 is officially recorded as cleared. 
+- **Semantics**: The candidate pool $N$ rigorously excludes 10m cloud masks and NaN predictions while mathematically preserving label `255` (unknown Open Buildings background) to satisfy D013/D014. $K$ perfectly mirrors the frozen training-derived area budget.
+- **Spatial Hardening**: Cloud masks are strictly validated against a 4x affine resolution ratio, identical bounding boxes, and equivalent geometric origins before `nearest` resampling.
+- **Split Isolation**: Test set (Mumbai) integrity is protected; the scorer reads the frozen calibration budget artifact passively.
+
+**Limitations:** The positive-unlabelled evaluation remains purely an annotation-recovery measurement, not absolute building recall. The scorer operates via a global `np.argsort` requiring ~1.5 GB of system RAM for an 8000x9000 scene. The building-detector U-Net architecture and real Tier C inference producer remain completely unimplemented and constitute future work.
+
