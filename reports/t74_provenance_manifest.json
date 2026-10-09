@@ -1,0 +1,43 @@
+{
+  "checkpoint_provenance": {
+    "path": "checkpoints/t7_3_real_run_v1/best_model.pt",
+    "sha256": "8145eb85b1a2c8f4d30ee42105e552a0396d956fda98a63f60779d914f82dc57",
+    "size_bytes": 7752930,
+    "saved_epoch": 1,
+    "best_metric": 0.9238,
+    "load_test": "PASSED"
+  },
+  "training_configuration": {
+    "Training_AOI": "Delhi",
+    "Validation_AOI": "Pune",
+    "Held_out_Test_AOI": "Mumbai",
+    "epochs": 3,
+    "batch_size": 4,
+    "patch_size": 256,
+    "learning_rate": "1e-4",
+    "workers": 0,
+    "validation_cadence": 1,
+    "seed": 42,
+    "precision": "FP32",
+    "device": "NVIDIA GeForce RTX 3050 6GB Laptop GPU"
+  },
+  "inputs": {
+    "train_bicubic": "data/outputs/sen2sr/mosaic_aoi_delhi_urban/Bicubic_scene_test.tif",
+    "train_sen2sr": "data/outputs/sen2sr/mosaic_aoi_delhi_urban/SEN2SR_scene.tif",
+    "train_labels": "data/processed/eval_labels/aoi_delhi_urban_buildings_2_5m.tif",
+    "train_cloud_mask": "data/processed/sentinel2/mosaic_aoi_delhi_urban/cloud_mask.tif",
+    "val_sen2sr": "data/outputs/sen2sr/mosaic_aoi_pune_peri_urban/SEN2SR_scene.tif",
+    "val_bicubic": "data/outputs/sen2sr/mosaic_aoi_pune_peri_urban/Bicubic_scene.tif",
+    "val_labels": "data/processed/eval_labels/aoi_pune_peri_urban_buildings_2_5m.tif",
+    "val_cloud_mask": "data/processed/sentinel2/mosaic_aoi_pune_peri_urban/cloud_mask.tif"
+  },
+  "budget": {
+    "frozen_budget_path": "data/processed/eval_labels/pu_area_budget.json",
+    "frozen_budget_sha256": "7d994b5d8f0c59c6e406adb5353e203c4410d0537356a2c76811f9fced3a2bd0",
+    "observed_budget_value": 0.1973425628900519
+  },
+  "other_hashes": {
+    "last_checkpoint_v1": "13e83c8ddb94eec2453b42257422d01a257cd978f4e7f3d19f107cacca55d3ab",
+    "last_checkpoint_v0": "7b90e3d769ea5e1bf7949f24a2589b22949ddbe796d998290fb30b7fda6d88b8"
+  }
+}
