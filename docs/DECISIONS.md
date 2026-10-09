@@ -142,3 +142,31 @@
 
 **Reproducibility:** Record the eligible AOIs, per-AOI positive and valid pixel counts, per-AOI ratios, final budget, input hashes, and deterministic selection rules. If no eligible training AOI has accepted Tier C annotations, budget derivation fails and the evaluation remains blocked.
 
+---
+
+## D015 — Tier C Prediction Output Contract (2026-10-09)
+
+**Context:** The Tier C U-Net evaluation scorer requires a strictly defined I/O contract for model predictions before inference is implemented.
+
+**Decision:** 
+1. **Format:** Model predictions for Tier C must be saved as a single-band `float32` GeoTIFF.
+2. **Alignment:** The prediction raster MUST perfectly match the corresponding ground-truth label raster's dimensions, CRS, and affine transform (canonical 2.5m grid).
+3. **Semantics:** Higher prediction scores indicate a stronger positive building probability. Non-finite scores and NoData values must be excluded from the eligible candidate pool.
+4. **Candidate Pool (`N`):** The eligible pixel pool $N$ for selecting the top `round(b * N)` predictions is defined strictly as valid imagery pixels (excluding NoData and cloud mask pixels). Pixels with label `255` (unknown Open Buildings background) are explicitly *retained* in the candidate pool for prediction and ranking to ensure the budget denominator matches the D014 derivation rules.
+5. **No Recalibration:** The frozen `pu_area_budget.json` must be loaded without modification.
+
+**Reason:** Prevents silent grid mismatches, ensures deterministic row-major tie-breaking on standard data types, and aligns the evaluation denominator perfectly with the D014 budget derivation.
+
+---
+
+## D016 — Gate 4 Acceptance and Tier C Scorer (2026-10-09)
+
+**Context:** Gate 4 protocol review demands verified Positive-Unlabelled (PU) semantics, immutable budget alignment, and hardened spatial mapping before any Tier C inference can be authorized or scored.
+
+**Decision:** The Tier C scorer (`src/eval/tier_c.py`) is accepted and Gate 4 is officially recorded as cleared. 
+- **Semantics**: The candidate pool $N$ rigorously excludes 10m cloud masks and NaN predictions while mathematically preserving label `255` (unknown Open Buildings background) to satisfy D013/D014. $K$ perfectly mirrors the frozen training-derived area budget.
+- **Spatial Hardening**: Cloud masks are strictly validated against a 4x affine resolution ratio, identical bounding boxes, and equivalent geometric origins before `nearest` resampling.
+- **Split Isolation**: Test set (Mumbai) integrity is protected; the scorer reads the frozen calibration budget artifact passively.
+
+**Limitations:** The positive-unlabelled evaluation remains purely an annotation-recovery measurement, not absolute building recall. The scorer operates via a global `np.argsort` requiring ~1.5 GB of system RAM for an 8000x9000 scene. The building-detector U-Net architecture and real Tier C inference producer remain completely unimplemented and constitute future work.
+
