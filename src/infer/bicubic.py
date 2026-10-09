@@ -113,64 +113,48 @@ def run_bicubic(
         raise FileNotFoundError(f"Input raster not found: {input_path}")
 
     # ── 1. Read input and validate ────────────────────────────────────────────
-    with rasterio.open(input_path) as src:
-        if src.count != REQUIRED_BAND_COUNT:
+    if input_path.is_dir():
+        if band_order is None:
+            raise ValueError("Must provide explicit band_order or metadata_path when input is a directory.")
+        source_paths = [input_path / f"{b}.tif" for b in band_order]
+        for p in source_paths:
+            if not p.exists():
+                raise FileNotFoundError(f"Required band file not found: {p}")
+        open_kwargs = {}
+    else:
+        source_paths = [input_path] * REQUIRED_BAND_COUNT
+        open_kwargs = {}
+
+    with rasterio.open(source_paths[0], **open_kwargs) as src0:
+        if not input_path.is_dir() and src0.count != REQUIRED_BAND_COUNT:
             raise ValueError(
                 f"Input raster must contain exactly 4 bands [B02, B03, B04, B08], "
-                f"but found {src.count} bands."
+                f"but found {src0.count} bands."
             )
-        if src.crs is None:
+        if src0.crs is None:
             raise ValueError(
                 f"Input raster has no CRS. A valid coordinate reference system "
                 f"is required for georeferenced bicubic resampling."
             )
-        if src.transform is None or src.transform == Affine.identity():
+        if src0.transform is None or src0.transform == Affine.identity():
             raise ValueError(
                 f"Input raster has no valid affine geotransform. "
                 f"Georeferencing is required."
             )
 
-        in_crs = src.crs
-        in_transform = src.transform
-        in_height = src.height
-        in_width = src.width
-        dtype_str = str(src.dtypes[0])
+        in_crs = src0.crs
+        in_transform = src0.transform
+        in_height = src0.height
+        in_width = src0.width
+        dtype_str = str(src0.dtypes[0])
+        src_nodata = src0.nodata
 
-        # ── 2. Normalise reflectance — EXACT T1.1 convention ─────────────────
-        # T1.1 (run_sen2sr.py lines 199-203):
-        #   Integer dtype → divide by 10000.0 → float32
-        #   Float dtype   → cast to float32 unchanged
-        raw_data = src.read()  # shape: (4, H, W)
+    out_height = int(in_height * scale)
+    out_width = int(in_width * scale)
 
-        out_height = int(in_height * scale)
-        out_width = int(in_width * scale)
-
-        # ── 3. Bicubic upsample via GDAL cubic kernel ─────────────────────────
-        # rasterio.read(out_shape=...) delegates to gdal_warp under the hood.
-        # Resampling.cubic is the genuine cubic convolution kernel, the same
-        # method used by gdalwarp -r cubic and QGIS "Cubic" resampling.
-        t0 = time.perf_counter()
-        resampled_raw = src.read(
-            out_shape=(REQUIRED_BAND_COUNT, out_height, out_width),
-            resampling=Resampling.cubic,
-        )  # dtype = same as source
-
-    latency_ms = (time.perf_counter() - t0) * 1000.0
-
-    # Apply the same normalisation rule as T1.1, post-resampling.
-    # Resampling first (in native integer space) then normalising preserves
-    # the numeric scale that T1.1 operates in after loading.
-    if np.issubdtype(resampled_raw.dtype, np.integer):
-        normalized_data = resampled_raw.astype(np.float32) / 10000.0
-    else:
-        normalized_data = resampled_raw.astype(np.float32)
-
-    # ── 4. Construct output georeference ─────────────────────────────────────
-    # Reuse scale_affine_transform from T1.1: scales the full 6-parameter
-    # linear component, preserving origin, spatial extent, and rotation/shear.
+    # ── 2. Construct output georeference ─────────────────────────────────────
     out_transform = scale_affine_transform(in_transform, scale=scale)
 
-    # ── 5. Write output GeoTIFF ───────────────────────────────────────────────
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     profile = {
@@ -182,21 +166,47 @@ def run_bicubic(
         "crs": in_crs,
         "transform": out_transform,
         "tiled": True,
-        "blockxsize": min(256, out_width),
-        "blockysize": min(256, out_height),
+        "blockxsize": min(512, out_width),
+        "blockysize": min(512, out_height),
         "compress": "deflate",
+        "bigtiff": "YES"
     }
+    if src_nodata is not None:
+        profile["nodata"] = src_nodata
+
+    # ── 3. Bicubic upsample via GDAL out-of-core VRT ────────────────────────
+    from rasterio.vrt import WarpedVRT
+    from rasterio.windows import Window
+    
+    t0 = time.perf_counter()
 
     with rasterio.open(output_path, "w", **profile) as dst:
-        dst.write(normalized_data)
-        for idx, desc in enumerate(band_order, start=1):
+        for idx, (path, desc) in enumerate(zip(source_paths, band_order), start=1):
             dst.set_band_description(idx, desc)
+            src_band_idx = 1 if input_path.is_dir() else idx
+            
+            with rasterio.open(path) as src:
+                with WarpedVRT(src, resampling=Resampling.cubic, crs=in_crs, 
+                               transform=out_transform, height=out_height, width=out_width) as vrt:
+                    
+                    for _, window in dst.block_windows(1):
+                        data = vrt.read(src_band_idx, window=window)
+                        
+                        # Apply normalisation identical to T1.1
+                        if np.issubdtype(src.dtypes[src_band_idx-1], np.integer):
+                            normalized = data.astype(np.float32) / 10000.0
+                        else:
+                            normalized = data.astype(np.float32)
+                            
+                        dst.write(normalized, idx, window=window)
+
+    latency_ms = (time.perf_counter() - t0) * 1000.0
 
     return {
         "input_path": str(input_path),
         "output_path": str(output_path),
-        "input_shape": list(raw_data.shape),
-        "output_shape": list(normalized_data.shape),
+        "input_shape": [REQUIRED_BAND_COUNT, in_height, in_width],
+        "output_shape": [REQUIRED_BAND_COUNT, out_height, out_width],
         "input_dtype": dtype_str,
         "output_dtype": "float32",
         "resampling": "cubic",

@@ -344,3 +344,63 @@ class TestRasterReadability:
         assert result["resampling"] == "cubic"
         assert result["output_dtype"] == "float32"
         assert result["latency_ms"] > 0
+
+
+def _write_1band_raster(
+    path: pathlib.Path,
+    height: int = 32,
+    width: int = 32,
+    dtype="uint16",
+    crs: CRS = CRS.from_epsg(32643),
+    transform: Affine = Affine(10.0, 0.0, 200000.0, 0.0, -10.0, 2100000.0),
+    value=1000,
+) -> pathlib.Path:
+    data = np.full((1, height, width), value, dtype=dtype)
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": dtype,
+        "crs": crs,
+        "transform": transform,
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(data)
+    return path
+
+class TestDirectoryInput:
+    def test_directory_based_four_band_bicubic(self, tmp_path):
+        in_dir = tmp_path / "in_mosaic"
+        in_dir.mkdir()
+        
+        band_order = ["B02", "B03", "B04", "B08"]
+        band_values = [1000, 1500, 2000, 3000]
+        
+        for b, v in zip(band_order, band_values):
+            _write_1band_raster(in_dir / f"{b}.tif", value=v)
+            
+        out = tmp_path / "out_mosaic.tif"
+        run_bicubic(in_dir, out, band_order=band_order)
+        
+        with rasterio.open(out) as dst:
+            assert dst.count == 4
+            data = dst.read()
+            assert math.isclose(data[0].mean(), 0.1, rel_tol=1e-5)
+            assert math.isclose(data[3].mean(), 0.3, rel_tol=1e-5)
+            
+    def test_numerical_comparison_with_legacy(self, tmp_path):
+        in_file = _write_4band_raster(tmp_path / "in_4band.tif")
+        out_file = tmp_path / "out_file.tif"
+        run_bicubic(in_file, out_file, band_order=["B02", "B03", "B04", "B08"])
+        
+        in_dir = tmp_path / "in_dir"
+        in_dir.mkdir()
+        for i, b in enumerate(["B02", "B03", "B04", "B08"]):
+            _write_1band_raster(in_dir / f"{b}.tif", value=[1000, 1500, 2000, 3000][i])
+        
+        out_dir = tmp_path / "out_dir.tif"
+        run_bicubic(in_dir, out_dir, band_order=["B02", "B03", "B04", "B08"])
+        
+        with rasterio.open(out_file) as src1, rasterio.open(out_dir) as src2:
+            np.testing.assert_allclose(src1.read(), src2.read(), rtol=1e-5)

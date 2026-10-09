@@ -170,3 +170,25 @@
 
 **Limitations:** The positive-unlabelled evaluation remains purely an annotation-recovery measurement, not absolute building recall. The scorer operates via a global `np.argsort` requiring ~1.5 GB of system RAM for an 8000x9000 scene. The building-detector U-Net architecture and real Tier C inference producer remain completely unimplemented and constitute future work.
 
+---
+
+## D017 — Tier C Detector Training: Proxy Naïve BCE Exception (2026-10-09)
+
+**Context:** Tier C U-Net detector training requires a loss function, but the Open Buildings V3 annotations (positive only) strongly violate the Selected Completely At Random (SCAR) assumption required by standard Positive-Unlabelled (PU) estimators because they systematically under-sample dense or obscured structures.
+**Decision:**
+1. **Training-Only Proxy Labeling:** During training batch construction *only*, the dataset loader is authorized to map canonical label `255` to proxy target `0` for Binary Cross-Entropy (BCE) optimization. This is formally approved as a restricted, training-only exception to D011 to establish a proxy task mimicking annotator bias.
+2. **Canonical Data Immutability:** The canonical `.tif` label files must never be mutated. Their semantics remain frozen: `1` = accepted positive footprint, `0` = independently verified non-building, `255` = unknown. Claims that unknown pixels are genuine negatives are strictly prohibited.
+3. **Objective Scope:** The intended claim is restricted to Open Buildings annotation recovery under the frozen Tier C Area-Budgeted Recall protocol (D014). Claims of unbiased real-world building precision, recall, F1, or absolute spatial accuracy are prohibited. Annotation-selection bias is expected, and the model may suppress real buildings missing from Open Buildings.
+4. **Validation and Checkpointing:** Validation BCE computed against proxy-negative labels is strictly prohibited as a checkpoint-selection or early-stopping metric. Checkpoint selection must be confined to the approved validation procedure (Area-Budgeted Recall).
+5. **Frozen Evaluation Components:** The official Tier C scorer, the Delhi-derived area budget, and the Train (Delhi) / Val (Pune) / Test (Mumbai) split remain mathematically unchanged.
+
+---
+
+## D018 — Tier C Detector Training: Mixed-Domain Input Contract (2026-10-09)
+
+**Context:** The Tier C U-Net detector must be evaluated separately on Bicubic and SEN2SR inputs to isolate the downstream impact of super-resolution (see D017). A decision is required on the input domain used to train the detector.
+**Decision:**
+1. **Training:** Train one shared detector using a balanced 50/50 mixture of paired 2.5 m Bicubic and SEN2SR training patches from the Delhi training AOI.
+2. **Evaluation:** Evaluate that exact same trained detector separately on Bicubic and SEN2SR inputs for the Pune validation AOI.
+3. Both modalities must use identical geographic evaluation regions, the frozen Tier C scorer, and the identical area budget.
+**Reason:** This establishes a controlled comparative experiment to test annotation recovery differences. It is not proof that mixed training eliminates domain bias or that SR is inherently superior. No separate detectors or alternative input strategies may be introduced without a new owner-approved decision.
