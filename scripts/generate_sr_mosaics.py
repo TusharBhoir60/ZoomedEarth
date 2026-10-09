@@ -10,7 +10,7 @@ from src.infer.bicubic import run_bicubic
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("generate_sr_mosaics")
 
-ALLOWED_AOIS = ["mosaic_aoi_delhi_urban", "mosaic_aoi_pune_peri_urban"]
+ALLOWED_AOIS = ["mosaic_aoi_delhi_urban", "mosaic_aoi_pune_peri_urban", "mosaic_aoi_mumbai_urban"]
 
 def generate_bicubic(aoi_id: str, overwrite: bool = False):
     processed_dir = pathlib.Path("data/processed/sentinel2")
