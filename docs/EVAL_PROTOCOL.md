@@ -76,11 +76,17 @@ We evaluate pretrained (and optionally finetuned) Sentinel-2 10 m → 2.5 m SR. 
 
 Additionally report SR vs **raw 10 m** (the "why not just use 10 m directly" comparison). Any outcome is reportable. Do **not** change the protocol, labels, or model to improve a result.
 
-## 9. Tier D: uncertainty calibration
+## 9. Tier D: uncertainty calibration and gates
 - Error = per-pixel absolute error vs HR reference on Tier A, after the benchmark's alignment handling.
 - Report: Spearman(uncertainty, error) per tile and on a subsample of pixels (note spatial autocorrelation); sparsification curve (remove highest-uncertainty pixels first, plot remaining error, compare to random and oracle) and area under it; reliability plot (binned uncertainty vs mean error).
-- Gate: Spearman < 0.3 → try the next method (ensemble); if still low, report as is.
 - Visual sanity: high on edges/fine texture, low on flat areas. Uniform noise = bug.
+- **Reporting Statistics:** For each uncertainty raster, compute per-band over explicitly valid pixels (`cloud_mask == 0`): valid/excluded pixel counts, mean, median, 90th/95th/99th percentiles, max finite std, and non-finite fraction. Visualizations must separate valid from invalid regions. Zero-variance on masked/padded pixels must not be interpreted as high confidence. Tier C labels MUST NOT be used for calibration.
+- **Evaluation Gates:**
+  - **Gate A (Output integrity):** CLI and raster contract tests pass. Four-band canonical `float32`, existing outputs protected, mask alignment documented.
+  - **Gate B (Tiled-inference validity):** A genuinely larger input naturally enters the tiled-inference branch. All eight restored predictions align correctly. Overlap blending and rectangular-input limitations explicitly tested or safely rejected. *(CLEARED: patched via `predict_large_patched`)*
+  - **Gate C (Controlled multi-tile):** Validated on a small representative set. Baseline SR unmodified. Runtime, VRAM, and failure behaviors recorded.
+  - **Gate D (Tier A scientific calibration):** Suitable high-resolution reference imagery exists. Spearman rank > 0.3. If Tier A data is unavailable, this gate is blocked and no calibrated confidence claims are permitted.
+  - **Gate E (AOI-scale authorization):** Gates A–C pass. Runtime/storage estimates documented. Safe behavior for missing masks/unsupported geometries verified. Gate D status explicitly recorded.
 
 ## 10. Tier E: consistency (sanity gate)
 - Per-band RMSE, SAM, relative error between SR↓10 m and input, all methods, all AOIs.

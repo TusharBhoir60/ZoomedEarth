@@ -176,6 +176,7 @@ def infer_tile(
     device: Optional[str] = None,
     model: Optional[Any] = None,
     require_10m: bool = True,
+    uncertainty: str = "none",
 ) -> Dict[str, Any]:
     """
     Run SEN2SR inference on one T2.5 tile directory.
@@ -225,6 +226,13 @@ def infer_tile(
     in_transform = profile["transform"]
     in_crs = profile["crs"]
 
+    if uncertainty == "tta":
+        if (output_dir / "uncertainty.tif").exists():
+            raise FileExistsError(f"Uncertainty raster already exists at {output_dir / 'uncertainty.tif'}")
+            
+    elif uncertainty != "none":
+        raise ValueError(f"Unsupported uncertainty mode: {uncertainty}")
+
     # 2. Select device
     if device is None:
         target_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -247,23 +255,43 @@ def infer_tile(
 
     t0 = time.perf_counter()
 
-    with torch.no_grad():
-        if H_in > 128 or W_in > 128:
-            from sen2sr.utils import predict_large
-            output_tensor = predict_large(
-                permuted_tensor := torch.from_numpy(permuted).to(target_device),
+    def _run_inference(tensor: torch.Tensor) -> torch.Tensor:
+        h, w = tensor.shape[-2:]
+        if h > 128 or w > 128:
+            from src.infer.predict_large import predict_large_patched
+            return predict_large_patched(
+                tensor.squeeze(0),
                 model=model,
                 overlap=32,
             ).cpu()
-        elif H_in == 128 and W_in == 128:
-            output_tensor = model(input_tensor).squeeze(0).cpu()
+        elif h == 128 and w == 128:
+            return model(tensor).squeeze(0).cpu()
         else:
-            # Small tile — pad to 128×128, run model, crop
-            pad_h = max(0, 128 - H_in)
-            pad_w = max(0, 128 - W_in)
-            padded = torch.nn.functional.pad(input_tensor, (0, pad_w, 0, pad_h), mode="replicate")
+            pad_h = max(0, 128 - h)
+            pad_w = max(0, 128 - w)
+            padded = torch.nn.functional.pad(tensor, (0, pad_w, 0, pad_h), mode="replicate")
             out_padded = model(padded)
-            output_tensor = out_padded[0, :, :int(H_in * SCALE), :int(W_in * SCALE)].cpu()
+            return out_padded[0, :, :int(h * SCALE), :int(w * SCALE)].cpu()
+
+    with torch.no_grad():
+        output_tensor = _run_inference(input_tensor)
+        
+        if uncertainty == "tta":
+            from src.models.uncertainty import augment, inverse_augment, aggregate_tta
+            tta_preds = []
+            for i in range(8):
+                if target_device.type == "cuda":
+                    torch.cuda.synchronize(target_device)
+                aug_in = augment(input_tensor, i)
+                aug_out = _run_inference(aug_in)
+                restored = inverse_augment(aug_out, i)
+                
+                if restored.shape != output_tensor.shape:
+                    raise ValueError(f"TTA variant {i} output shape {restored.shape} != primary {output_tensor.shape}")
+                
+                tta_preds.append(restored)
+                
+            _, uncertainty_tensor = aggregate_tta(tta_preds)
 
     if target_device.type == "cuda":
         torch.cuda.synchronize(target_device)
@@ -309,6 +337,28 @@ def infer_tile(
         for i, desc in enumerate(INPUT_BANDS):
             dst.set_band_description(i + 1, desc)
 
+    if uncertainty == "tta":
+        uncertainty_rgbn = uncertainty_tensor.float().numpy()
+        uncertainty_arr = np.empty_like(uncertainty_rgbn)
+        uncertainty_arr[0] = uncertainty_rgbn[2]
+        uncertainty_arr[1] = uncertainty_rgbn[1]
+        uncertainty_arr[2] = uncertainty_rgbn[0]
+        uncertainty_arr[3] = uncertainty_rgbn[3]
+        
+        if np.any(np.isnan(uncertainty_arr)) or np.any(np.isinf(uncertainty_arr)):
+            raise ValueError("TTA generated NaN/Inf standard deviations.")
+            
+        unc_raster_path = output_dir / "uncertainty.tif"
+        if unc_raster_path.exists():
+            raise FileExistsError(f"Uncertainty raster already exists at {unc_raster_path}")
+            
+        unc_tmp_path = output_dir / "uncertainty.tif.tmp"
+        with rasterio.open(unc_tmp_path, "w", **out_profile) as dst:
+            dst.write(uncertainty_arr)
+            for i, desc in enumerate(INPUT_BANDS):
+                dst.set_band_description(i + 1, desc)
+        unc_tmp_path.rename(unc_raster_path)
+
     # 10. Write metadata.json
     in_tf = in_transform
     out_tf = out_transform
@@ -342,6 +392,7 @@ def infer_tile(
         "output_transform": [out_tf.a, out_tf.b, out_tf.c, out_tf.d, out_tf.e, out_tf.f],
         "dtype": "float32",
         "precision": "fp32",
+        "uncertainty_mode": uncertainty,
         "inference_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "inference_duration_seconds": round(inference_duration_s, 4),
         "peak_vram_mb": peak_vram_mb,
@@ -365,6 +416,7 @@ def cli_main():
         "--weights", default="models/SEN2SRLite", help="SEN2SRLite weights dir"
     )
     parser.add_argument("--device", default=None, help="Torch device (cuda/cpu)")
+    parser.add_argument("--uncertainty", default="none", choices=["none", "tta"], help="Enable uncertainty estimation")
     args = parser.parse_args()
 
     t0 = time.perf_counter()
@@ -373,6 +425,7 @@ def cli_main():
         output_dir=args.output_dir,
         weights_dir=args.weights,
         device=args.device,
+        uncertainty=args.uncertainty,
     )
     elapsed = time.perf_counter() - t0
 

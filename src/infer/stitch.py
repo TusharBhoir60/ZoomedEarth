@@ -27,7 +27,8 @@ def create_feather_weight(height: int, width: int) -> np.ndarray:
 
 def stitch_scene(item_id: str,
                  processed_dir: str = "data/processed/sentinel2",
-                 sr_output_dir: str = "data/outputs/sen2sr") -> Dict[str, Any]:
+                 sr_output_dir: str = "data/outputs/sen2sr",
+                 uncertainty: str = "none") -> Dict[str, Any]:
     
     source_scene_meta_path = Path(processed_dir) / item_id / "metadata.json"
     if not source_scene_meta_path.exists():
@@ -123,101 +124,102 @@ def stitch_scene(item_id: str,
             f"Expected contract version {CONTRACT_VERSION}, got {tiles_info[0]['band_order_contract_version']}"
         )
     
-    output_path = sr_dir / "SEN2SR_scene.tif"
-    out_profile = {
-        "driver": "GTiff",
-        "height": sr_height,
-        "width": sr_width,
-        "count": 4,
-        "dtype": "float32",
-        "crs": in_crs,
-        "transform": sr_transform,
-        "tiled": True,
-        "blockxsize": min(512, sr_width),
-        "blockysize": min(512, sr_height),
-        "compress": "deflate",
-        "nodata": np.nan,
-        "bigtiff": "YES", # Explicit BigTIFF for full scenes
-    }
-    
-    buffer_capacity = 2048 # Holds ~4 tile rows simultaneously
-    val_buffer = np.zeros((4, buffer_capacity, sr_width), dtype=np.float32)
-    wt_buffer = np.zeros((4, buffer_capacity, sr_width), dtype=np.float32)
-    buffer_start_y = 0
-    
-    feather_weights = {}
-    
+    def run_stitch_layer(source_name: str, out_name: str, descriptions: list):
+        output_path = sr_dir / out_name
+        out_profile = {
+            "driver": "GTiff",
+            "height": sr_height,
+            "width": sr_width,
+            "count": 4,
+            "dtype": "float32",
+            "crs": in_crs,
+            "transform": sr_transform,
+            "tiled": True,
+            "blockxsize": min(512, sr_width),
+            "blockysize": min(512, sr_height),
+            "compress": "deflate",
+            "nodata": np.nan,
+            "bigtiff": "YES", # Explicit BigTIFF for full scenes
+        }
+        
+        buffer_capacity = 2048 # Holds ~4 tile rows simultaneously
+        val_buffer = np.zeros((4, buffer_capacity, sr_width), dtype=np.float32)
+        wt_buffer = np.zeros((4, buffer_capacity, sr_width), dtype=np.float32)
+        buffer_start_y = 0
+        feather_weights = {}
+        
+        tmp_output_path = output_path.with_suffix('.tif.tmp')
+        with rasterio.open(tmp_output_path, "w", **out_profile) as dst:
+            for i, band_desc in enumerate(descriptions):
+                dst.set_band_description(i + 1, band_desc)
+
+            def flush_buffer(end_y: int):
+                nonlocal buffer_start_y
+                write_h = end_y - buffer_start_y
+                if write_h <= 0: return buffer_start_y
+                
+                val_out = val_buffer[:, :write_h, :]
+                wt_out = wt_buffer[:, :write_h, :]
+                
+                mask = wt_out > 0
+                final_out = np.full_like(val_out, np.nan)
+                final_out[mask] = val_out[mask] / wt_out[mask]
+                
+                window = Window(0, buffer_start_y, sr_width, write_h)
+                dst.write(final_out, window=window)
+                
+                remaining = buffer_capacity - write_h
+                val_buffer[:, :remaining, :] = val_buffer[:, write_h:, :]
+                val_buffer[:, remaining:, :] = 0.0
+                wt_buffer[:, :remaining, :] = wt_buffer[:, write_h:, :]
+                wt_buffer[:, remaining:, :] = 0.0
+                return end_y
+
+            for t in tiles_info:
+                r = t["y_offset"]
+                c = t["x_offset"]
+                w = t["width"]
+                h = t["height"]
+                
+                if r + h > buffer_start_y + buffer_capacity:
+                    buffer_start_y = flush_buffer(r)
+                    
+                src_path = t["path"].parent / source_name
+                if not src_path.exists():
+                    raise FileNotFoundError(f"Missing {source_name} for tile {t['path'].parent.name}")
+                with rasterio.open(src_path) as src:
+                    data = src.read()
+                    
+                shape_key = (h, w)
+                if shape_key not in feather_weights:
+                    feather_weights[shape_key] = create_feather_weight(h, w)
+                fw = feather_weights[shape_key]
+                
+                valid_mask = ~np.isnan(data)
+                
+                wt_to_add = np.broadcast_to(fw[np.newaxis, ...], data.shape).copy()
+                wt_to_add[~valid_mask] = 0.0
+                val_to_add = data.copy()
+                val_to_add[~valid_mask] = 0.0
+                val_to_add *= wt_to_add
+                
+                buf_y = r - buffer_start_y
+                scene_w = min(w, sr_width - c)
+                scene_h = min(h, sr_height - r)
+                
+                if scene_w > 0 and scene_h > 0:
+                    val_buffer[:, buf_y:buf_y+scene_h, c:c+scene_w] += val_to_add[:, :scene_h, :scene_w]
+                    wt_buffer[:, buf_y:buf_y+scene_h, c:c+scene_w] += wt_to_add[:, :scene_h, :scene_w]
+                
+            flush_buffer(sr_height)
+        
+        tmp_output_path.rename(output_path)
+
     t0 = time.perf_counter()
-    
-    with rasterio.open(output_path, "w", **out_profile) as dst:
-        for i, band_desc in enumerate(tiles_info[0]["output_band_order"]):
-            dst.set_band_description(i + 1, band_desc)
-
-        def flush_buffer(end_y: int):
-            nonlocal buffer_start_y
-            write_h = end_y - buffer_start_y
-            if write_h <= 0: return buffer_start_y
-            
-            # extract ready block
-            val_out = val_buffer[:, :write_h, :]
-            wt_out = wt_buffer[:, :write_h, :]
-            
-            # compute valid pixels
-            mask = wt_out > 0
-            final_out = np.full_like(val_out, np.nan)
-            final_out[mask] = val_out[mask] / wt_out[mask]
-            
-            window = Window(0, buffer_start_y, sr_width, write_h)
-            dst.write(final_out, window=window)
-            
-            # shift
-            remaining = buffer_capacity - write_h
-            val_buffer[:, :remaining, :] = val_buffer[:, write_h:, :]
-            val_buffer[:, remaining:, :] = 0.0
-            wt_buffer[:, :remaining, :] = wt_buffer[:, write_h:, :]
-            wt_buffer[:, remaining:, :] = 0.0
-            
-            return end_y
-
-        for t in tiles_info:
-            r = t["y_offset"]
-            c = t["x_offset"]
-            w = t["width"]
-            h = t["height"]
-            
-            # If the current tile exceeds our active buffer, flush the completed rows
-            if r + h > buffer_start_y + buffer_capacity:
-                buffer_start_y = flush_buffer(r)
-                
-            with rasterio.open(t["path"]) as src:
-                data = src.read() # (4, H, W)
-                
-            shape_key = (h, w)
-            if shape_key not in feather_weights:
-                feather_weights[shape_key] = create_feather_weight(h, w)
-            fw = feather_weights[shape_key]
-            
-            valid_mask = ~np.isnan(data)
-            
-            # Tile feather weights mapped perfectly to valid pixels
-            wt_to_add = np.broadcast_to(fw[np.newaxis, ...], data.shape).copy()
-            wt_to_add[~valid_mask] = 0.0
-            
-            val_to_add = data.copy()
-            val_to_add[~valid_mask] = 0.0
-            val_to_add *= wt_to_add
-            
-            buf_y = r - buffer_start_y
-            
-            # Clip bounds in case tiles exceed scene margins
-            scene_w = min(w, sr_width - c)
-            scene_h = min(h, sr_height - r)
-            
-            if scene_w > 0 and scene_h > 0:
-                val_buffer[:, buf_y:buf_y+scene_h, c:c+scene_w] += val_to_add[:, :scene_h, :scene_w]
-                wt_buffer[:, buf_y:buf_y+scene_h, c:c+scene_w] += wt_to_add[:, :scene_h, :scene_w]
-            
-        flush_buffer(sr_height)
+    run_stitch_layer("SEN2SR.tif", "SEN2SR_scene.tif", tiles_info[0]["output_band_order"])
+    if uncertainty == "tta":
+        unc_desc = [f"{b} TTA Uncertainty" for b in tiles_info[0]["output_band_order"]]
+        run_stitch_layer("uncertainty.tif", "uncertainty_scene.tif", unc_desc)
         
     elapsed = time.perf_counter() - t0
     
@@ -252,6 +254,7 @@ def stitch_scene(item_id: str,
         "git_sha": _get_git_sha(),
         "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "software_versions": _get_software_versions(),
+        "uncertainty_mode": uncertainty,
         "elapsed_seconds": round(elapsed, 2)
     }
     
@@ -264,11 +267,12 @@ def stitch_scene(item_id: str,
 def cli_main():
     parser = argparse.ArgumentParser(description="Stitch SEN2SR tiles into a full scene.")
     parser.add_argument("--item-id", required=True, help="Sentinel-2 Item ID")
+    parser.add_argument("--uncertainty", default="none", choices=["none", "tta"], help="Enable uncertainty")
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
     logger.info(f"Stitching scene {args.item_id}...")
-    meta = stitch_scene(args.item_id)
+    meta = stitch_scene(args.item_id, uncertainty=args.uncertainty)
     logger.info(f"Stitching complete. Output: {meta['width']}x{meta['height']} in {meta['elapsed_seconds']}s")
 
 if __name__ == "__main__":

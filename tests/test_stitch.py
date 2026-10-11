@@ -58,6 +58,13 @@ def test_stitch_scene_synthetic(tmp_path):
             dst.set_band_description(3, "B04")
             dst.set_band_description(4, "B08")
             
+        with rasterio.open(t_dir / "uncertainty.tif", "w", **profile) as dst:
+            dst.write(data * 0.1) # Mock uncertainty as 10% of data
+            dst.set_band_description(1, "B02")
+            dst.set_band_description(2, "B03")
+            dst.set_band_description(3, "B04")
+            dst.set_band_description(4, "B08")
+            
         with open(t_dir / "metadata.json", "w") as f:
             json.dump({
                 "output_transform": [tile_tf.a, tile_tf.b, tile_tf.c, tile_tf.d, tile_tf.e, tile_tf.f],
@@ -82,7 +89,7 @@ def test_stitch_scene_synthetic(tmp_path):
     
     # Move and run again
     shutil.move(sr_dir / "SEN2SR_scene.tif", sr_dir / "SEN2SR_scene_1.tif")
-    meta2 = stitch_scene(item_id, processed_dir=str(processed_dir), sr_output_dir=str(sr_output_dir))
+    meta2 = stitch_scene(item_id, processed_dir=str(processed_dir), sr_output_dir=str(sr_output_dir), uncertainty="tta")
     
     with rasterio.open(sr_dir / "SEN2SR_scene.tif") as src:
         out_data2 = src.read()
@@ -136,3 +143,26 @@ def test_stitch_scene_synthetic(tmp_path):
         # 6. Uncovered regions (y >= 512 or x >= 960) should be NaN
         assert np.all(np.isnan(out_data[:, 512:, :]))
         assert np.all(np.isnan(out_data[:, :, 960:]))
+
+    # 7. Check uncertainty output
+    unc_path = sr_dir / "uncertainty_scene.tif"
+    assert unc_path.exists()
+    
+    with rasterio.open(unc_path) as src:
+        assert src.shape == (1024, 1024)
+        assert src.count == 4
+        unc_data = src.read()
+        
+        # Check descriptions
+        assert src.descriptions == ('B02 TTA Uncertainty', 'B03 TTA Uncertainty', 'B04 TTA Uncertainty', 'B08 TTA Uncertainty')
+        
+        # Values should be 10% of out_data
+        assert np.allclose(unc_data[~np.isnan(unc_data)], out_data[~np.isnan(out_data)] * 0.1)
+
+if __name__ == '__main__':
+    import tempfile
+    import pathlib
+    test_feather_weights()
+    with tempfile.TemporaryDirectory() as td:
+        test_stitch_scene_synthetic(pathlib.Path(td))
+    print('ALL STITCH TESTS PASSED')
