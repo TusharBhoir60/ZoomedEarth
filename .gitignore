@@ -9,13 +9,13 @@ __pycache__/
 .venv/
 
 # Data (never in git)
-data/
+/data/
 
 # Model weights (downloaded, not committed)
-models/
+/models/
 
 # Experiment outputs
-outputs/
+/outputs/
 
 # Editor
 .idea/
