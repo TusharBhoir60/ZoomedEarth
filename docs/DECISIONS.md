@@ -192,3 +192,45 @@
 2. **Evaluation:** Evaluate that exact same trained detector separately on Bicubic and SEN2SR inputs for the Pune validation AOI.
 3. Both modalities must use identical geographic evaluation regions, the frozen Tier C scorer, and the identical area budget.
 **Reason:** This establishes a controlled comparative experiment to test annotation recovery differences. It is not proof that mixed training eliminates domain bias or that SR is inherently superior. No separate detectors or alternative input strategies may be introduced without a new owner-approved decision.
+
+---
+
+## D019 — Phase 6 TTA Uncertainty Output Semantics and Evaluation Contract (2026-10-10)
+
+**Context:** The Phase 6 Test-Time Augmentation (TTA) uncertainty product requires explicit semantics, masking rules, stitching contracts, and evaluation gates before being authorized for AOI-scale inference.
+
+**Decision:**
+1. **Uncertainty Output Product:** The tile uncertainty product is strictly the pixel-wise population standard deviation ($N=8$, `unbiased=False`) across the 8 spatially restored D4 dihedral transformations. It is serialized as a 4-band `float32` GeoTIFF perfectly co-registered with `SEN2SR.tif`, retaining canonical `[B02, B03, B04, B08]` band order. The unaugmented, non-TTA SEN2SR prediction remains the authoritative primary output; the TTA mean is not used as the super-resolved image. TTA disagreement measures transformation-sensitive model variability, NOT calibrated Bayesian posterior uncertainty or absolute error.
+2. **Geometry Contract (Square Tiles):** Dihedral TTA requires square input tiles ($H_{\text{in}} == W_{\text{in}}$). Rectangular inputs are rejected with `ValueError` at the tile entrypoint because transposed transformations alter sliding-window overlap alignments.
+3. **Mask and Validity Semantics:** Authoritative pixel invalidity (clouds, shadow, NoData) is governed exclusively by `cloud_mask.tif`, not by zero variance in the uncertainty raster. Input NaNs are substituted with 0.0 before inference; consequently, standard deviation over padded or flat regions evaluates to near-zero. This near-zero disagreement MUST NOT be interpreted as high confidence. Tile `uncertainty.tif` files contain no embedded NoData tag and no injected NaNs, strictly preserving the legacy raster contract. Masking must occur downstream.
+4. **Scene Stitching Contract:** In scene-level mosaicking (`scripts/generate_sr_mosaics.py` and `src/infer/stitch.py`), `uncertainty_scene.tif` is produced by blending tile uncertainty rasters using the identical 2D separable linear Bartlett feather weights applied to `SEN2SR_scene.tif`. This is a spatial transition blending across tile boundaries to eliminate seam discontinuities, not a statistical variance pooling across independent scenes.
+5. **Descriptive Statistics and Visualizations:** Statistical evaluation must be computed ONLY over explicitly valid pixels (`cloud_mask == 0`). Reporting must record per-band valid pixel count, excluded pixel count, mean, median, 90th/95th/99th percentiles, maximum finite std, and non-finite count. Visualizations must overlay the validity mask and must not declare absolute confidence thresholds.
+6. **Evaluation Gates:**
+   - **Gate A (Output Integrity):** CLI and raster contract, 4-band `float32` format, canonical band order/naming, and per-file temporary-file publication (`.tmp` rename). Established across Phase 6.7.1–6.7.3 implementation and testing; raster format, band descriptions, and failure safety were reconfirmed in the focused unit test suite.
+   - **Gate B (Tiled-Inference Validity):** Genuinely larger inputs execute safely via `predict_large_patched` for baseline SR, while rectangular TTA is safely rejected via defensive guard. Verified in Phase 6.6.5/6.6.6 and reconfirmed in unit/oracle tests.
+   - **Gate C (Controlled Multi-Tile):** Validated on small representative sets with flat GPU VRAM (~164 MB) in Phase 6.7.0 benchmarks; baseline SR output is unmodified.
+   - **Gate D (Tier A Calibration):** Requires verified high-resolution reference imagery (e.g., opensr-test). Spearman rank $> 0.3$ and sparsification required. Tier C labels are strictly prohibited for calibration. Current status: **BLOCKED** until Tier A reference-based calibration prerequisites are satisfied; claims of calibrated confidence are prohibited.
+   - **Gate E (AOI-Scale Authorization):** Requires Gates A–C to clear, documented runtime/storage budgets, and explicit acknowledgement of Gate D status. Current status: **NOT AUTHORIZED** until operational readiness requirements are reviewed and explicit authorization is granted. Clearing Gate B and documenting D019/D020 does not authorize AOI-scale inference.
+
+**Reason:** Prevents unbacked claims of calibration, documents the intended output, masking, and evaluation contracts, and formalizes the decoupling of cloud masking from raw tensor statistics.
+
+---
+
+## D020 — Tiled-Inference Geometry Repair for Rectangular Inputs (2026-10-10)
+
+**Context:** Upstream `sen2sr.utils.predict_large` crashed on rectangular inputs exceeding 128 pixels because it allocated the output canvas using the input height (`X.shape[1]`) for both spatial dimensions and swapped the x/y axes when computing overlap crop boundaries. This blocked Gate B and prevented arbitrary tile dimensions in baseline inference.
+
+**Decision:**
+1. **Implementation & D005 Amendment:** Introduced a project-owned adapter (`src/infer/predict_large.py`: `predict_large_patched`) which supersedes the third bullet of D005. It corrects output tensor shape allocation and sliding-window crop indexing.
+2. **Behavioral Contract and Tested Evidence:**
+   - **Contract:** Preserves the standard 128×128 sliding window with 32 px overlap. The adapter is implemented to partition inputs $>128$ px, execute sliding-window inference, crop overlap margins, and assemble the $4\times$ output canvas.
+   - **Tested Geometries:** Exact pixel equivalence with upstream SEN2SR is verified on square geometries (e.g., 128×128, 256×256). Output dimensions, spatial overlap ownership, and gap-free reconstruction are verified by unit and oracle tests for specific evaluated geometries: square (64×64, 128×128, 200×200, 256×256), rectangular $H > W$ (300×200), rectangular $W > H$ (200×300), and non-divisible dimensions (177×233).
+   - **Scope Limitation:** Passing tests on these evaluated dimensions demonstrates correct indexing and overlap management for the tested configurations; untested arbitrary geometries or extreme dimensions are not thereby proven safe.
+3. **Integration and Scope Boundaries:**
+   - `src/infer/infer_tile.py` directs inputs $>128$ px to `predict_large_patched` for baseline SR (`uncertainty="none"`).
+   - Rectangular inputs under TTA (`uncertainty="tta"`) remain guarded by an explicit `ValueError`. Rectangular geometry support applies to baseline inference, NOT Dihedral TTA.
+4. **Hardware and Resource Scope:**
+   - Sliding-window chunking maintains flat peak GPU VRAM (~164 MB on RTX 3050).
+   - The output canvas is accumulated in system CPU RAM. For full-scene AOI processing, pipeline execution must continue to use tile-scene decomposition (`src/ingest/tile_scene.py`) and streaming buffered stitching (`src/infer/stitch.py`), rather than passing multi-gigabyte rasters into `predict_large_patched` as a single tensor.
+
+**Reason:** Unlocks robust rectangular tile inference for baseline SR without modifying upstream package files, while explicitly preserving defensive guards on non-square TTA.

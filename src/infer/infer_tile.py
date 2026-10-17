@@ -229,6 +229,11 @@ def infer_tile(
     if uncertainty == "tta":
         if (output_dir / "uncertainty.tif").exists():
             raise FileExistsError(f"Uncertainty raster already exists at {output_dir / 'uncertainty.tif'}")
+        if H_in != W_in:
+            raise ValueError(
+                f"Rectangular input ({W_in}x{H_in}) is unsupported by upstream Dihedral TTA; "
+                "input tile must be square (width == height)."
+            )
             
     elif uncertainty != "none":
         raise ValueError(f"Unsupported uncertainty mode: {uncertainty}")
